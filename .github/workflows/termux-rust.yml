@@ -1,0 +1,209 @@
+name: Build Termux binaries
+
+# Produces android/arm64 and android/arm binaries of the Rust rewrite.
+#
+# Both are built because the port is meant to run on any Android device; the
+# 64-bit one is what a current phone needs, and the 32-bit one is kept as an
+# artefact for older hardware rather than dropped silently.
+#
+# The NDK is used rather than a plain `cargo build` because GitHub's runners
+# cannot run a cross linker for Android without it. On a real Termux device the
+# same source builds natively with no NDK at all — see the README.
+
+on:
+  push:
+    branches: [main, termux-rust]
+    paths:
+      - 'termux-rust/**'
+      - '.github/workflows/termux-rust.yml'
+  pull_request:
+    paths:
+      - 'termux-rust/**'
+      - '.github/workflows/termux-rust.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The APK build targets an older API level for compatibility; the same floor
+  # is used here so a binary that runs in CI also runs on the same devices the
+  # Android app supported.
+  NDK_VERSION: r27c
+  API_LEVEL: 24
+
+jobs:
+  test:
+    name: Test (host)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: termux-rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: termux-rust
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --all-targets
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            label: arm64
+            ndk_triple: aarch64-linux-android
+          - target: armv7-linux-androideabi
+            label: arm
+            ndk_triple: armv7a-linux-androideabi
+    defaults:
+      run:
+        working-directory: termux-rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: termux-rust
+          key: ${{ matrix.target }}
+
+      - name: Install Android NDK
+        run: |
+          set -euo pipefail
+          NDK_ROOT="$RUNNER_TEMP/android-ndk"
+          echo "NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
+          if [ -d "$NDK_ROOT" ]; then
+            echo "NDK already present"
+            exit 0
+          fi
+          curl -sSL -o "$RUNNER_TEMP/ndk.zip" \
+            "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          unzip -q "$RUNNER_TEMP/ndk.zip" -d "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/android-ndk-${NDK_VERSION}" "$NDK_ROOT"
+          rm -f "$RUNNER_TEMP/ndk.zip"
+
+      - name: Configure the Android target
+        run: |
+          set -euo pipefail
+          TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+          CC="$TOOLCHAIN/bin/${{ matrix.ndk_triple }}${API_LEVEL}-clang"
+          if [ ! -x "$CC" ]; then
+            echo "missing compiler: $CC" >&2
+            ls "$TOOLCHAIN/bin" | grep -i "${{ matrix.ndk_triple }}" | head >&2
+            exit 1
+          fi
+          echo "CC_${{ matrix.target }}=$CC" >> "$GITHUB_ENV"
+          echo "AR_${{ matrix.target }}=$TOOLCHAIN/bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')_LINKER=$CC" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        env:
+          CC: ${{ env.CC_aarch64-linux-android }}
+        run: |
+          set -euo pipefail
+          # Pick the compiler for this matrix entry; a single env var cannot be
+          # named dynamically in the workflow syntax, so it is resolved here.
+          case "${{ matrix.target }}" in
+            aarch64-linux-android)
+              export CC="$TOOLCHAIN/bin/aarch64-linux-android${API_LEVEL}-clang"
+              export AR="$TOOLCHAIN/bin/llvm-ar"
+              ;;
+            armv7-linux-androideabi)
+              export CC="$TOOLCHAIN/bin/armv7a-linux-androideabi${API_LEVEL}-clang"
+              export AR="$TOOLCHAIN/bin/llvm-ar"
+              ;;
+          esac
+          export CARGO_TARGET_DIR=target
+          # The cc crate (pulled in by ring/rustls) reads the upper-case form of
+          # the target as its env var name.
+          TARGET_UPPER=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
+          export "CC_${TARGET_UPPER}=$CC"
+          export "AR_${TARGET_UPPER}=$AR"
+          export "CARGO_TARGET_${TARGET_UPPER}_LINKER=$CC"
+          cargo build --release --target "${{ matrix.target }}" --locked
+
+      - name: Verify and package
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/wbhub"
+          [ -x "$BIN" ] || { echo "binary not produced at $BIN" >&2; exit 1; }
+          file "$BIN" || true
+          "$TOOLCHAIN/bin/llvm-strip" "$BIN" 2>/dev/null || true
+          ls -lh "$BIN"
+          mkdir -p dist
+          cp "$BIN" "dist/wbhub-${{ matrix.label }}"
+          # A checksum so a download can be verified on the phone, where a
+          # truncated transfer is otherwise indistinguishable from a crash.
+          ( cd dist && sha256sum "wbhub-${{ matrix.label }}" > "wbhub-${{ matrix.label }}.sha256" )
+          cat dist/*.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wbhub-${{ matrix.label }}
+          path: |
+            termux-rust/dist/wbhub-${{ matrix.label }}
+            termux-rust/dist/wbhub-${{ matrix.label }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Attach to a rolling release
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Show what will be published
+        run: ls -lR artifacts
+
+      # A single rolling tag keeps the README's download link stable, which
+      # matters because the target audience is a phone with no easy way to match
+      # a version number to a file name.
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: termux-latest
+          name: Termux builds (rolling)
+          body: |
+            Rolling build of the Rust port, for Termux on Android.
+
+            * `wbhub-arm64` — 64-bit Android (`uname -m` reports `aarch64`). **Use this one on any current phone.**
+            * `wbhub-arm` — 32-bit Android (`armv7l`), for older devices.
+
+            ```sh
+            pkg install -y curl
+            curl -L -o wbhub https://github.com/${{ github.repository }}/releases/download/termux-latest/wbhub-arm64
+            chmod +x wbhub
+            ./wbhub --help
+            ```
+
+            Built from `${{ github.sha }}`.
+          files: |
+            artifacts/wbhub-arm64
+            artifacts/wbhub-arm64.sha256
+            artifacts/wbhub-arm
+            artifacts/wbhub-arm.sha256
+          fail_on_unmatched_files: true

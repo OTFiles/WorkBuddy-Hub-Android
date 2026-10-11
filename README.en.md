@@ -2,6 +2,17 @@
 
 English | [中文](./README.md)
 
+> **This is a fork of [`xc3qaq/WorkBuddy-Hub-Android`](https://github.com/xc3qaq/WorkBuddy-Hub-Android)
+> that adds a [**Rust rewrite built to compile and run under Termux**](./termux-rust) — a single
+> binary, no APK and no computer required. To use it, on the phone:**
+>
+> ```sh
+> curl -L -o wbhub https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
+> chmod +x wbhub && ./wbhub login && ./wbhub serve
+> ```
+>
+> Everything below describes the **original Android app** and is kept as it was.
+
 Connect a WorkBuddy account to any OpenAI-compatible client. The app runs a
 local forwarding endpoint on your phone; point your editor, agent, or script at
 it and it works — no official API, and no computer required.

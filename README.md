@@ -2,6 +2,17 @@
 
 [English](./README.en.md) | 中文
 
+> **这是 [`xc3qaq/WorkBuddy-Hub-Android`](https://github.com/xc3qaq/WorkBuddy-Hub-Android) 的 fork，增加了
+> [**专门在 Termux 里编译运行的 Rust 重写版**](./termux-rust)——单文件二进制，不需要 APK、
+> 不需要电脑。想要这个就在手机上装：
+>
+> ```sh
+> curl -L -o wbhub https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
+> chmod +x wbhub && ./wbhub login && ./wbhub serve
+> ```
+>
+> 下面的内容是**原 Android 版**的说明，原样保留。
+
 把 WorkBuddy 账号接到任意 OpenAI 兼容客户端。App 在手机本地起一个转发端点，你的
 编辑器 / Agent / 脚本把 `baseUrl` 指过来就能用，不需要官方开放 API，也不需要电
 脑。

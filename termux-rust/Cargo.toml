@@ -1,0 +1,53 @@
+[package]
+name = "wbhub"
+version = "0.1.0"
+edition = "2021"
+description = "WorkBuddy Hub for Termux — an OpenAI-compatible bridge to WorkBuddy/CodeBuddy accounts, rewritten in Rust"
+license = "MIT"
+repository = "https://github.com/OTFiles/WorkBuddy-Hub-Android"
+readme = "README.md"
+rust-version = "1.75"
+
+[[bin]]
+name = "wbhub"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "signal",
+    "fs",
+] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-webpki-roots",
+    "stream",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+
+[dev-dependencies]
+# none: the test suite is dependency-free on purpose so `cargo test` works on
+# a phone without pulling another tree.
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
