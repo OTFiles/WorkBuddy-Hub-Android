@@ -9,10 +9,11 @@ to run under [Termux](https://termux.dev). One static binary — no Android Stud
 no APK, no PC.
 
 ```sh
-curl -L -o wbhub https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
-chmod +x wbhub
-./wbhub login      # sign in once, in a browser
-./wbhub serve      # start the endpoint
+curl -L -o wbhub-arm64 https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
+chmod +x wbhub-arm64
+mv wbhub-arm64 wbhub        # optional: shorten the name, then use ./wbhub
+./wbhub login               # sign in once, in a browser
+./wbhub serve               # start the endpoint
 ```
 
 Then point any OpenAI-compatible client at it:
@@ -56,12 +57,13 @@ The protocol and the server never needed a GUI. Once they live in Termux:
 uname -m                     # aarch64 → wbhub-arm64;  armv7l → wbhub-arm
 
 pkg install -y curl
-curl -L -o wbhub https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
-# Verify if you like — a truncated download is otherwise indistinguishable from a crash:
-curl -L -o wbhub.sha256 https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64.sha256
-sha256sum -c wbhub.sha256
-chmod +x wbhub
-mkdir -p ~/.local/bin && mv wbhub ~/.local/bin/
+curl -L -o wbhub-arm64 https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
+# Verify if you like — a truncated download is otherwise indistinguishable from a crash.
+# The checksum file names the asset, so keep the same file name here:
+curl -L -o wbhub-arm64.sha256 https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64.sha256
+sha256sum -c wbhub-arm64.sha256
+chmod +x wbhub-arm64
+mkdir -p ~/.local/bin && mv wbhub-arm64 ~/.local/bin/wbhub
 wbhub --version
 ```
 

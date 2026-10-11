@@ -9,6 +9,7 @@
 > ```sh
 > curl -L -o wbhub https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
 > chmod +x wbhub && ./wbhub login && ./wbhub serve
+> # 想校验下载：.sha256 里的文件名是 wbhub-arm64，保持一致再 sha256sum -c
 > ```
 >
 > 下面的内容是**原 Android 版**的说明，原样保留。

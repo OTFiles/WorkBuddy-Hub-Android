@@ -8,10 +8,11 @@ Studio、不需要 APK、不需要电脑。
 
 ```sh
 pkg install -y curl
-curl -L -o wbhub https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
-chmod +x wbhub
-./wbhub login      # 浏览器登录一次
-./wbhub serve      # 起服务
+curl -L -o wbhub-arm64 https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
+chmod +x wbhub-arm64
+mv wbhub-arm64 wbhub        # 可选：改短名字，后面用 ./wbhub
+./wbhub login               # 浏览器登录一次
+./wbhub serve               # 起服务
 ```
 
 然后任意 OpenAI 兼容客户端把 `baseUrl` 指过来：
@@ -54,12 +55,13 @@ Termux 之后：
 uname -m                     # aarch64 = 用 wbhub-arm64；armv7l = 用 wbhub-arm
 
 pkg install -y curl
-curl -L -o wbhub https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
+curl -L -o wbhub-arm64 https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
 # 校验（可选但建议：手机上下载很容易被截断）
-curl -L -o wbhub.sha256 https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64.sha256
-sha256sum -c wbhub.sha256
-chmod +x wbhub
-mkdir -p ~/.local/bin && mv wbhub ~/.local/bin/
+# 注意 .sha256 里的文件名就是 wbhub-arm64，所以这里要保持同样的名字
+curl -L -o wbhub-arm64.sha256 https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64.sha256
+sha256sum -c wbhub-arm64.sha256
+chmod +x wbhub-arm64
+mkdir -p ~/.local/bin && mv wbhub-arm64 ~/.local/bin/wbhub
 wbhub --version
 ```
 

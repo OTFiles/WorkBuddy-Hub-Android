@@ -9,6 +9,8 @@ English | [中文](./README.md)
 > ```sh
 > curl -L -o wbhub https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
 > chmod +x wbhub && ./wbhub login && ./wbhub serve
+> # to verify the download, keep the published name and run
+> # curl -LO .../wbhub-arm64.sha256 && sha256sum -c wbhub-arm64.sha256
 > ```
 >
 > Everything below describes the **original Android app** and is kept as it was.

@@ -195,8 +195,10 @@ jobs:
 
             ```sh
             pkg install -y curl
-            curl -L -o wbhub https://github.com/${{ github.repository }}/releases/download/termux-latest/wbhub-arm64
-            chmod +x wbhub
+            curl -L -O https://github.com/${{ github.repository }}/releases/download/termux-latest/wbhub-arm64
+            curl -L -O https://github.com/${{ github.repository }}/releases/download/termux-latest/wbhub-arm64.sha256
+            sha256sum -c wbhub-arm64.sha256   # the checksum file names the asset
+            chmod +x wbhub-arm64 && mv wbhub-arm64 wbhub
             ./wbhub --help
             ```
 
