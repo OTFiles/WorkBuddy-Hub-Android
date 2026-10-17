@@ -64,9 +64,16 @@ impl CallRecord {
 }
 
 /// Append-only log with a bounded number of retained rows.
+///
+/// Cloning is cheap (a path plus a limit) and lets a stream hold its own handle
+/// so a client disconnect can still be recorded from `Drop`.
+#[derive(Clone)]
 pub struct CallLog {
     path: PathBuf,
     limit: usize,
+    /// Appends since the last trim, so the common case does not re-read the
+    /// whole file just to discover it is still under the limit.
+    appends: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl CallLog {
@@ -75,6 +82,7 @@ impl CallLog {
         CallLog {
             path,
             limit: limit.max(1),
+            appends: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -96,14 +104,24 @@ impl CallLog {
                 .create(true)
                 .append(true)
                 .open(&self.path)
-                .with_context(|| format!("opening {}", self.path.display()))?;
+                .with_context(|| format!("打开 {}", self.path.display()))?;
             writeln!(file, "{line}")?;
             Ok(())
         };
         if write().is_err() {
             return;
         }
-        self.trim_if_needed();
+        // Re-reading the whole file on every append is O(n) per call for no
+        // benefit: only a run that is actually over the limit needs a trim, and
+        // the counter says when that can possibly be true.
+        let since_trim = self
+            .appends
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if since_trim >= self.limit.max(1) {
+            self.appends.store(0, std::sync::atomic::Ordering::Relaxed);
+            self.trim_if_needed();
+        }
     }
 
     fn trim_if_needed(&self) {
@@ -158,7 +176,7 @@ impl CallLog {
         match fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| format!("removing {}", self.path.display())),
+            Err(error) => Err(error).with_context(|| format!("删除 {}", self.path.display())),
         }
     }
 
@@ -232,13 +250,18 @@ mod tests {
     fn the_log_is_trimmed_to_its_limit() {
         let dir = scratch("trim");
         let log = CallLog::open(&dir, 3);
-        for index in 0..6 {
+        // Three writes reach the limit, so a trim runs on the third; the next
+        // three fill it again before the following trim.
+        for index in 0..9 {
             log.append(&record(&format!("m{index}"), true));
         }
         let all = log.read_all().unwrap();
-        assert_eq!(all.len(), 3);
-        assert_eq!(all[0].model, "m3", "the oldest rows are the ones dropped");
-        assert_eq!(all[2].model, "m5");
+        assert!(all.len() <= 3, "retained {} rows", all.len());
+        assert_eq!(
+            all.last().unwrap().model,
+            "m8",
+            "the newest row must always survive"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -1,11 +1,9 @@
-//! Command line surface.
+//! 命令行界面。
 //!
-//! The Android build exposed these actions as screens in a Compose app. Termux
-//! has no UI, so each screen becomes a subcommand and the whole surface is
-//! scriptable — which is the point of running it under Termux at all.
+//! 原 Android 版把这些动作做成 Compose 里的一个个页面。Termux 没有 UI，所以每个
+//! 页面变成一个子命令，整套能力都能写进脚本——这也是在 Termux 里跑它的意义。
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -13,24 +11,29 @@ use serde_json::json;
 
 use crate::bridge::{self, Bridge};
 use crate::calllog::CallRecord;
+use crate::growth;
 use crate::login;
 use crate::settings::Settings;
 use crate::store::Store;
 use crate::upstream;
+use crate::wake::WakeLock;
 use crate::wire::{self, Region};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "wbhub",
     version,
-    about = "WorkBuddy Hub for Termux — an OpenAI-compatible bridge to WorkBuddy/CodeBuddy quota",
-    long_about = "Runs a local OpenAI-compatible endpoint backed by your own WorkBuddy \
-                  (国内版) or WorkBuddy Global account. Point any OpenAI client at \
-                  http://127.0.0.1:8765/v1 and it will be served by your account."
+    about = "WorkBuddy Hub for Termux —— 把 WorkBuddy / CodeBuddy 账号变成 OpenAI 兼容端点",
+    long_about = "在你的手机上跑一个本地 OpenAI 兼容端点，用你自己的 WorkBuddy（国内版）\
+                  或 WorkBuddy 国际版账号作为上游。\n\n\
+                  把任意 OpenAI 客户端指向 http://127.0.0.1:8765/v1 即可使用。",
+    next_help_heading = "选项",
+    after_help = "示例：\n  wbhub login              登录国内版账号\n  wbhub serve              启动端点\n  wbhub models             看可用模型\n  wbhub balance            看剩余额度\n  wbhub daily              签到 + 连登兑换 + 抽奖\n\n\
+                  数据目录默认 $PREFIX/var/lib/wbhub，可用 --data-dir 或 WBHUB_DIR 改。"
 )]
 pub struct Cli {
-    /// Data directory (credentials, settings, call log).
-    #[arg(long, global = true)]
+    /// 数据目录（凭证、设置、调用记录）
+    #[arg(long, global = true, value_name = "目录", help_heading = "选项")]
     pub data_dir: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -39,143 +42,256 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Sign in to a build and save the credential.
+    /// 登录一个版本并保存凭证
     Login(LoginArgs),
-    /// List saved accounts.
+    /// 列出已保存的账号
     Accounts,
-    /// Switch the account or build that the endpoint serves.
+    /// 切换端点使用的账号或版本
     Use(UseArgs),
-    /// Remove a saved account.
+    /// 删除已保存的账号
     Logout(LogoutArgs),
-    /// Run the OpenAI-compatible endpoint in the foreground.
+    /// 前台运行 OpenAI 兼容端点
     Serve(ServeArgs),
-    /// Show the endpoint URL and key for a running bridge.
+    /// 查看端点地址和密钥
     Status,
-    /// Show remaining credit.
+    /// 查看剩余额度
     Balance(BalanceArgs),
-    /// Claim the daily check-in bonus.
+    /// 领取每日签到奖励
     Checkin(CheckinArgs),
-    /// List the models the account can serve.
+    /// 跑一遍日常奖励（补签 → 礼包 → 兑换 → 抽奖）
+    Daily(DailyArgs),
+    /// 推进猫猫旅行（派出 / 领取）
+    Travel(TravelArgs),
+    /// 上报夜猫子任务（23:00–08:00 有效）
+    Night(NightArgs),
+    /// 查看成长任务进度
+    Tasks(TasksArgs),
+    /// 列出账号可用的模型
     Models(ModelsArgs),
-    /// Show the recorded calls.
+    /// 查看调用记录
     Calls(CallsArgs),
-    /// Remove the recorded calls.
+    /// 清空调用记录
     ClearCalls,
-    /// Show or change settings.
+    /// 导出当前账号凭证（给别的工具用）
+    Export(ExportArgs),
+    /// 查看或修改设置
     Config(ConfigArgs),
 }
 
 #[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
 pub struct LoginArgs {
-    /// Which build to sign in to.
-    #[arg(long, value_parser = parse_region, default_value = "cn")]
+    /// 登录哪个版本：cn（国内版）或 global（国际版）
+    #[arg(long, value_name = "版本", value_parser = parse_region, default_value = "cn")]
     pub region: Region,
-    /// Do not try to open the URL in a browser (print it only).
+    /// 不自动打开浏览器，只打印链接
     #[arg(long)]
     pub no_open: bool,
-    /// Seconds to wait for the browser half of the flow.
-    #[arg(long, default_value_t = 300)]
+    /// 等待浏览器登录完成的秒数
+    #[arg(long, value_name = "秒", default_value_t = 300)]
     pub timeout: u64,
 }
 
 #[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
 pub struct UseArgs {
-    /// Account id, nickname, or a unique prefix of either.
+    /// 账号标识、昵称，或它们的前缀
+    #[arg(value_name = "账号")]
     pub account: String,
-    /// Which build the account belongs to.
-    #[arg(long, value_parser = parse_region)]
+    /// 账号属于哪个版本（不填则自动查找）
+    #[arg(long, value_name = "版本", value_parser = parse_region)]
     pub region: Option<Region>,
 }
 
 #[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
 pub struct LogoutArgs {
-    /// Account id, nickname, or a unique prefix. Omit to remove every account.
+    /// 账号标识、昵称或前缀；不填则删除全部账号
+    #[arg(value_name = "账号")]
     pub account: Option<String>,
-    /// Which build to remove from.
-    #[arg(long, value_parser = parse_region)]
+    /// 只从这个版本里删除
+    #[arg(long, value_name = "版本", value_parser = parse_region)]
     pub region: Option<Region>,
-    /// Remove without asking.
+    /// 不再确认，直接删除
     #[arg(long, short = 'y')]
     pub yes: bool,
 }
 
 #[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
 pub struct ServeArgs {
-    /// Port to listen on. Defaults to the port in settings.
-    #[arg(long)]
+    /// 监听端口（不填则用设置里的端口）
+    #[arg(long, value_name = "端口")]
     pub port: Option<u16>,
-    /// Also serve the local network, authenticating peers with the LAN key.
+    /// 同时服务局域网（用独立的 LAN Key 鉴权）
     #[arg(long)]
     pub lan: bool,
-    /// Address to bind. Defaults to loopback, or every interface with --lan.
-    #[arg(long)]
+    /// 监听地址（默认 127.0.0.1；开 --lan 时默认 0.0.0.0）
+    #[arg(long, value_name = "地址")]
     pub bind: Option<String>,
-    /// Do not fetch the model catalogue at startup.
+    /// 启动时不拉取模型列表
     #[arg(long)]
     pub no_refresh: bool,
-    /// Print nothing per request.
+    /// 不打印每个请求的日志
     #[arg(long)]
     pub quiet: bool,
+    /// 不申请 Termux 唤醒锁
+    #[arg(long)]
+    pub no_wake_lock: bool,
 }
 
 #[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
 pub struct BalanceArgs {
-    /// Print raw JSON.
+    /// 输出原始 JSON
     #[arg(long)]
     pub json: bool,
 }
 
 #[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
 pub struct CheckinArgs {
-    /// Print raw JSON.
+    /// 输出原始 JSON
     #[arg(long)]
     pub json: bool,
 }
 
 #[derive(Args, Debug)]
-pub struct ModelsArgs {
-    /// Print the full catalogue as JSON.
+#[command(next_help_heading = "选项")]
+pub struct DailyArgs {
+    /// 同时领取每日签到
+    #[arg(long)]
+    pub with_checkin: bool,
+    /// 顺带推进猫猫旅行
+    #[arg(long)]
+    pub with_travel: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
+pub struct TravelArgs {
+    /// 只看状态，不派出也不领取
+    #[arg(long)]
+    pub status: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
+pub struct NightArgs {
+    /// 只看任务进度，不上报
+    #[arg(long)]
+    pub status: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
+pub struct TasksArgs {
+    /// 输出原始 JSON
     #[arg(long)]
     pub json: bool,
-    /// Print only the model ids, one per line.
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
+pub struct ModelsArgs {
+    /// 输出完整模型信息（JSON）
+    #[arg(long)]
+    pub json: bool,
+    /// 只输出模型名，一行一个
     #[arg(long)]
     pub ids: bool,
 }
 
 #[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
 pub struct CallsArgs {
-    /// How many records to show, newest first.
-    #[arg(long, default_value_t = 20)]
+    /// 显示最近多少条（新的在前）
+    #[arg(long, value_name = "条数", default_value_t = 20)]
     pub limit: usize,
-    /// Print raw JSON.
+    /// 输出原始 JSON
     #[arg(long)]
     pub json: bool,
-    /// Summarise instead of listing.
+    /// 只显示汇总
     #[arg(long)]
     pub summary: bool,
 }
 
 #[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
+pub struct ExportArgs {
+    /// 写到文件而不是标准输出
+    #[arg(long, value_name = "文件")]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
 pub struct ConfigArgs {
-    /// Print the settings as JSON.
+    /// 以 JSON 输出设置
     #[arg(long)]
     pub json: bool,
-    /// Set a value: `--set port=9000`, `--set lan_enabled=true`.
-    #[arg(long, value_name = "KEY=VALUE")]
+    /// 修改一项设置，例如 --set port=9000
+    #[arg(long, value_name = "键=值")]
     pub set: Vec<String>,
-    /// Generate a new local API key.
+    /// 重新生成本机 API Key
     #[arg(long)]
     pub rotate_key: bool,
-    /// Generate a new LAN API key.
+    /// 重新生成局域网 Key
     #[arg(long)]
     pub rotate_lan_key: bool,
 }
 
-fn parse_region(value: &str) -> Result<Region, String> {
-    Region::parse(value).ok_or_else(|| format!("unknown build {value:?}; use cn or global"))
+/// 把 clap 内置的英文文案换成中文。
+///
+/// clap 没有本地化接口，`Usage:` / `Commands:` / `Options:` 这些标题和
+/// `-h/--help` 的说明都是写死的。这里的做法是：帮助模板自己写中文标题、小节
+/// 标题逐个覆盖、内置的 help/version 开关关掉后换成自己的。递归是因为每个子
+/// 命令各有一份。
+pub fn localize(command: clap::Command) -> clap::Command {
+    localize_at(command, true)
 }
 
-/// Resolves the data directory, honouring `--data-dir` and then the default.
+fn localize_at(mut command: clap::Command, is_root: bool) -> clap::Command {
+    command = command
+        // `{usage}` 只渲染用法本身，不带标题，所以标题可以由模板写成中文。
+        .help_template("{before-help}{about-with-newline}\n用法: {usage}\n\n{all-args}{after-help}")
+        .subcommand_help_heading("命令")
+        .next_help_heading("选项")
+        .disable_help_subcommand(true)
+        .disable_help_flag(true)
+        .disable_version_flag(true)
+        .arg(
+            clap::Arg::new("help")
+                .short('h')
+                .long("help")
+                .action(clap::ArgAction::Help)
+                .help("打印帮助信息")
+                .long_help("打印帮助信息（-h 只打印简略版）"),
+        );
+    if is_root {
+        command = command.arg(
+            clap::Arg::new("version")
+                .short('V')
+                .long("version")
+                .action(clap::ArgAction::Version)
+                .help("打印版本号"),
+        );
+    }
+    let names: Vec<String> = command
+        .get_subcommands()
+        .map(|sub| sub.get_name().to_string())
+        .collect();
+    for name in names {
+        command = command.mut_subcommand(name, |sub| localize_at(sub, false));
+    }
+    command
+}
+
+fn parse_region(value: &str) -> Result<Region, String> {
+    Region::parse(value).ok_or_else(|| format!("未知版本 {value:?}；可用：cn 或 global"))
+}
+
+/// 解析数据目录：`--data-dir` 优先，其次 `WBHUB_DIR`，最后是默认位置。
 pub fn open_store(cli: &Cli) -> Result<Store> {
     let dir = cli
         .data_dir
@@ -196,6 +312,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Status => status_cmd(&store),
         Command::Balance(args) => balance_cmd(&store, args).await,
         Command::Checkin(args) => checkin_cmd(&store, args).await,
+        Command::Daily(args) => daily_cmd(&store, args).await,
+        Command::Travel(args) => travel_cmd(&store, args).await,
+        Command::Night(args) => night_cmd(&store, args).await,
+        Command::Tasks(args) => tasks_cmd(&store, args).await,
         Command::Models(args) => models_cmd(&store, args).await,
         Command::Calls(args) => calls_cmd(&store, args),
         Command::ClearCalls => {
@@ -204,6 +324,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("调用记录已清空。");
             Ok(())
         }
+        Command::Export(args) => export_cmd(&store, args),
         Command::Config(args) => config_cmd(&store, args),
     }
 }
@@ -229,7 +350,7 @@ async fn login_cmd(store: &Store, args: LoginArgs) -> Result<()> {
     loop {
         if std::time::Instant::now() >= deadline {
             bail!(
-                "等待登录超时；可重试 `wbhub login --region {}`",
+                "等待登录超时；可以重试 `wbhub login --region {}`",
                 region.name()
             );
         }
@@ -239,21 +360,16 @@ async fn login_cmd(store: &Store, args: LoginArgs) -> Result<()> {
                 println!();
                 println!("登录成功：{}（{}）", saved.label(), saved.id);
                 if saved.expires_at > 0 {
-                    let when = chrono::DateTime::from_timestamp(saved.expires_at, 0)
-                        .map(|t| {
-                            t.with_timezone(&chrono::Local)
-                                .format("%Y-%m-%d %H:%M")
-                                .to_string()
-                        })
-                        .unwrap_or_default();
-                    println!("Token 有效期至 {when}");
+                    println!("Token 有效期至 {}", clock_of(saved.expires_at));
                 }
+                println!();
+                println!("下一步：wbhub serve");
                 return Ok(());
             }
             Ok(login::Poll::Pending) => {}
             Err(error) => {
-                // A refusal is terminal; a transient transport problem is not,
-                // and `poll` already folds those into `Pending`.
+                // 明确的拒绝是终局；短暂的网络抖动不是，那种情况 `poll` 已经
+                // 折成 `Pending` 了。
                 bail!("登录失败：{error}");
             }
         }
@@ -267,8 +383,8 @@ async fn login_cmd(store: &Store, args: LoginArgs) -> Result<()> {
     }
 }
 
-/// Best-effort browser hand-off. Termux's `termux-open-url` is the only opener
-/// that exists on a phone; on a normal Linux box `xdg-open` is used instead.
+/// 尽量把链接交给浏览器。手机上有 `termux-open-url` 才是关键；普通 Linux 上退回
+/// `xdg-open`。
 fn open_url(url: &str) {
     let candidates: [&str; 2] = ["termux-open-url", "xdg-open"];
     for candidate in candidates {
@@ -289,58 +405,45 @@ fn accounts_cmd(store: &Store) -> Result<()> {
         println!("还没有账号，先运行：wbhub login");
         return Ok(());
     }
-    let active_region = store.active_region();
     let active_id = store.active().map(|a| a.id).unwrap_or_default();
     println!(
-        "{:<4} {:<8} {:<20} {:<12} {:<20} 标识",
+        "{:<4} {:<8} {:<18} {:<10} {:<18} 标识",
         "标记", "版本", "账号", "UID", "Token 到期"
     );
     for account in &accounts {
         let marker = if account.id == active_id { "*" } else { "" };
         let expiry = if account.expires_at > 0 {
-            chrono::DateTime::from_timestamp(account.expires_at, 0)
-                .map(|t| {
-                    t.with_timezone(&chrono::Local)
-                        .format("%Y-%m-%d %H:%M")
-                        .to_string()
-                })
-                .unwrap_or_else(|| "-".into())
+            clock_of(account.expires_at)
         } else {
             "-".into()
         };
         println!(
-            "{:<4} {:<8} {:<20} {:<12} {:<20} {}",
+            "{:<4} {:<8} {:<18} {:<10} {:<18} {}",
             marker,
             account.region().label(),
-            account.label(),
-            short_uid(&account.uid),
+            truncate(&account.label(), 18),
+            truncate(&account.uid, 10),
             expiry,
             account.id
         );
     }
-    println!();
-    println!(
-        "当前使用：{}（{}）",
-        active_region.label(),
-        if active_id.is_empty() {
-            "无"
-        } else {
-            "见上"
-        }
-    );
+    if let Some(active) = store.active() {
+        println!();
+        println!(
+            "当前使用：{} · {}（{}）",
+            active.region().label(),
+            active.label(),
+            active.id
+        );
+    }
     Ok(())
-}
-
-fn short_uid(uid: &str) -> String {
-    uid.chars().take(8).collect()
 }
 
 fn use_cmd(store: &Store, args: UseArgs) -> Result<()> {
     let region = match args.region {
         Some(region) => region,
         None => {
-            // Search both builds so the user does not have to remember which one
-            // an account belongs to.
+            // 两个版本都找一遍，省得用户还要记着账号属于哪个版本。
             let matches: Vec<Region> = Region::all()
                 .into_iter()
                 .filter(|r| {
@@ -356,7 +459,7 @@ fn use_cmd(store: &Store, args: UseArgs) -> Result<()> {
                 [] => bail!("没有匹配的账号：{}", args.account),
                 [only] => *only,
                 many => bail!(
-                    "账号 {} 在多个版本中存在，请加 --region：{}",
+                    "账号 {} 在多个版本中都存在，请加 --region：{}",
                     args.account,
                     many.iter()
                         .map(|r| r.name())
@@ -377,6 +480,10 @@ fn logout_cmd(store: &Store, args: LogoutArgs) -> Result<()> {
         Some(region) => vec![region],
         None => Region::all().to_vec(),
     };
+    if args.account.is_none() && !args.yes {
+        let total: usize = regions.iter().map(|r| store.accounts(*r).len()).sum();
+        bail!("这会删除全部 {total} 个账号；确认请加 --yes");
+    }
     match &args.account {
         Some(needle) => {
             let mut removed = 0;
@@ -436,9 +543,28 @@ async fn serve_cmd(store: Store, args: ServeArgs) -> Result<()> {
     });
     let listener = tokio::net::TcpListener::bind((bind.as_str(), settings.port))
         .await
-        .with_context(|| format!("cannot bind {bind}:{}", settings.port))?;
+        .with_context(|| format!("无法监听 {bind}:{}", settings.port))?;
 
     let bridge = Bridge::new(store, settings.clone()).await;
+
+    // 唤醒锁对应原版的悬浮窗保活：息屏后 CPU 还要能继续跑，否则转发端点会在
+    // Deep Sleep 里静默停摆。拿不到就只是没锁，其它照旧。
+    let wake = if args.no_wake_lock {
+        None
+    } else if crate::wake::available() {
+        let lock = WakeLock::acquire();
+        if lock.held() {
+            Some(lock)
+        } else {
+            eprintln!("提示：没能拿到 Termux 唤醒锁，息屏后可能被系统暂停。");
+            None
+        }
+    } else {
+        eprintln!(
+            "提示：没装 termux-wake-lock；建议 `pkg install termux-api` 并装 Termux:API 应用。"
+        );
+        None
+    };
 
     if !bridge.store.has_any() {
         eprintln!("提示：还没有登录任何账号，先运行 `wbhub login`，否则 /v1/chat/completions 会返回 401。");
@@ -467,12 +593,15 @@ async fn serve_cmd(store: Store, args: ServeArgs) -> Result<()> {
     } else {
         println!("局域网   : 未开启（--lan 可开启）");
     }
+    if wake.is_some() {
+        println!("唤醒锁   : 已持有（退出时自动释放）");
+    }
     println!();
     println!("按 Ctrl-C 停止。");
     println!();
 
-    let refresh = {
-        let bridge = Arc::clone(&bridge);
+    let refresh_task = {
+        let bridge = std::sync::Arc::clone(&bridge);
         let minutes = settings.refresh_minutes.max(1);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(minutes * 60));
@@ -490,21 +619,40 @@ async fn serve_cmd(store: Store, args: ServeArgs) -> Result<()> {
             }
         })
     };
-    // Kept alive for the lifetime of the server; dropped with the runtime.
-    std::mem::drop(refresh);
 
-    let server = bridge::serve(Arc::clone(&bridge), listener);
-    tokio::select! {
+    let server = bridge::serve(std::sync::Arc::clone(&bridge), listener);
+    let outcome = tokio::select! {
         result = server => result,
-        _ = tokio::signal::ctrl_c() => {
+        _ = shutdown_signal() => {
             println!();
             println!("已停止。");
             Ok(())
         }
+    };
+    refresh_task.abort();
+    drop(wake);
+    drop(bridge);
+    outcome
+}
+
+/// Ctrl-C 或者 SIGTERM 都当作退出信号，这样 `tmux kill-window` / `kill` 也能走到
+/// 清理路径（主要是把唤醒锁放掉）。
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = match signal(SignalKind::terminate()) {
+        Ok(stream) => stream,
+        Err(_) => {
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
     }
 }
 
-/// The device's own LAN addresses, for the "point your laptop at this" hint.
+/// 本机在局域网里的地址，用来提示「笔记本该连哪个」。
 fn local_ipv4_addresses() -> Vec<String> {
     let mut addresses = Vec::new();
     if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
@@ -519,9 +667,8 @@ fn local_ipv4_addresses() -> Vec<String> {
 
 fn status_cmd(store: &Store) -> Result<()> {
     let settings = Settings::load(store.dir())?;
-    let account = store.active();
     println!("数据目录 : {}", store.dir().display());
-    match &account {
+    match store.active() {
         Some(account) => {
             println!(
                 "当前账号 : {}（{}）",
@@ -530,10 +677,10 @@ fn status_cmd(store: &Store) -> Result<()> {
             );
             println!("账号标识 : {}", account.id);
             if account.expires_at > 0 {
-                println!("Token 到期 : {}", account.expires_at);
+                println!("Token 到期 : {}", clock_of(account.expires_at));
             }
             if account.needs_refresh() {
-                println!("Token : 需要刷新（下次调用时会自动刷新）");
+                println!("Token : 已过期或即将过期（下次调用时会自动刷新）");
             }
         }
         None => println!("当前账号 : 未登录（运行 `wbhub login`）"),
@@ -613,6 +760,147 @@ async fn checkin_cmd(store: &Store, args: CheckinArgs) -> Result<()> {
     Ok(())
 }
 
+async fn daily_cmd(store: &Store, args: DailyArgs) -> Result<()> {
+    let account = resolve_active(store).await?;
+    println!("账号：{}（{}）", account.label(), account.region().label());
+    println!();
+
+    let mut steps: Vec<growth::Step> = Vec::new();
+    if args.with_checkin {
+        match upstream::checkin(&account).await {
+            Ok(outcome) => steps.push(growth::Step {
+                ok: outcome.ok,
+                message: if outcome.ok {
+                    format!("签到：{}", outcome.message)
+                } else {
+                    format!("签到未完成：{}", outcome.message)
+                },
+            }),
+            Err(error) => steps.push(growth::Step {
+                ok: false,
+                message: format!("签到失败：{error}"),
+            }),
+        }
+    }
+    steps.extend(growth::run_daily(&account).await);
+    if args.with_travel {
+        steps.extend(growth::travel_once(&account).await);
+    }
+
+    report(&steps);
+    Ok(())
+}
+
+async fn travel_cmd(store: &Store, args: TravelArgs) -> Result<()> {
+    let account = resolve_active(store).await?;
+    if args.status {
+        let status = growth::travel_status(&account).await?;
+        if status.state.is_empty() {
+            println!("还没有猫；执行 `wbhub travel` 会先领养一只。");
+        } else if status.traveling() {
+            println!(
+                "猫在路上，{} 到站（约 {} 分钟）",
+                clock_of(status.arrive_at),
+                status.minutes_until(crate::store::now_seconds())
+            );
+        } else if status.arrived() {
+            println!("猫已到站，执行 `wbhub travel` 领取奖励。");
+        } else {
+            println!("猫在家（状态：{}）", status.state);
+        }
+        if status.daily_limit_reached {
+            println!("今日已派出过。");
+        }
+        return Ok(());
+    }
+    let steps = growth::travel_once(&account).await;
+    report(&steps);
+    Ok(())
+}
+
+async fn night_cmd(store: &Store, args: NightArgs) -> Result<()> {
+    let account = resolve_active(store).await?;
+    if args.status {
+        match growth::task(&account, "black_cat").await? {
+            Some(task) => {
+                println!(
+                    "夜猫子：{}/{}（状态 {}）",
+                    task.current, task.target, task.accept_status
+                );
+                println!(
+                    "当前{}夜猫子时段（23:00–08:00）",
+                    if growth::in_night_window() {
+                        "处于"
+                    } else {
+                        "不在"
+                    }
+                );
+            }
+            None => println!("没找到夜猫子任务。"),
+        }
+        return Ok(());
+    }
+    let steps = growth::run_night_owl(&account).await;
+    report(&steps);
+    Ok(())
+}
+
+async fn tasks_cmd(store: &Store, args: TasksArgs) -> Result<()> {
+    let account = resolve_active(store).await?;
+    let tasks = growth::tasks(&account).await?;
+    if args.json {
+        let payload: Vec<serde_json::Value> = tasks
+            .iter()
+            .map(|t| {
+                json!({
+                    "code": t.code,
+                    "current": t.current,
+                    "target": t.target,
+                    "remaining": t.remaining(),
+                    "accept_status": t.accept_status,
+                    "claimed": t.claimed(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    if tasks.is_empty() {
+        println!("没有成长任务（国际版账号没有成长中心）。");
+        return Ok(());
+    }
+    println!("{:<28} {:<10} {:<8} 状态", "任务", "进度", "还差");
+    for task in &tasks {
+        println!(
+            "{:<28} {:<10} {:<8} {}",
+            task.code,
+            format!("{}/{}", task.current, task.target),
+            task.remaining(),
+            task.accept_status
+        );
+    }
+    Ok(())
+}
+
+/// 把一串步骤打成「✓ / ✗ + 说明」，最后给个总计。
+fn report(steps: &[growth::Step]) {
+    if steps.is_empty() {
+        println!("无可执行项。");
+        return;
+    }
+    let mut ok = 0;
+    for step in steps {
+        if step.ok {
+            ok += 1;
+            println!("  ✓ {}", step.message);
+        } else {
+            println!("  ✗ {}", step.message);
+        }
+    }
+    println!();
+    println!("完成 {} / {} 项。", ok, steps.len());
+}
+
 async fn models_cmd(store: &Store, args: ModelsArgs) -> Result<()> {
     let account = resolve_active(store).await?;
     let models = upstream::fetch_models(&account).await?;
@@ -645,7 +933,7 @@ async fn models_cmd(store: &Store, args: ModelsArgs) -> Result<()> {
         }
         return Ok(());
     }
-    println!("{:<28} {:<10} {:<10} 标记", "模型", "倍率", "上下文");
+    println!("{:<26} {:<10} {:<10} 标记", "模型", "倍率", "上下文");
     for model in &models {
         let rate = model.rate();
         let rate = if rate.is_empty() {
@@ -661,7 +949,7 @@ async fn models_cmd(store: &Store, args: ModelsArgs) -> Result<()> {
             marks.push("图片".into());
         }
         println!(
-            "{:<28} {:<10} {:<10} {}",
+            "{:<26} {:<10} {:<10} {}",
             model.id,
             rate,
             model.context_window,
@@ -709,7 +997,7 @@ fn calls_cmd(store: &Store, args: CallsArgs) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<20} {:<26} {:<6} {:>8} {:>8} {:<8} 来源",
+        "{:<16} {:<24} {:<7} {:>7} {:>7} {:<6} 来源",
         "时间", "模型", "结果", "输入", "输出", "积分"
     );
     for record in &records {
@@ -720,10 +1008,22 @@ fn calls_cmd(store: &Store, args: CallsArgs) -> Result<()> {
                     .to_string()
             })
             .unwrap_or_default();
+        let result = match record.outcome.as_str() {
+            "ok" => "成功",
+            "aborted" => "中断",
+            _ => "失败",
+        };
         let detail = record
             .detail
             .as_deref()
-            .map(|d| d.chars().take(30).collect::<String>())
+            .map(|d| {
+                d.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(28)
+                    .collect::<String>()
+            })
             .unwrap_or_default();
         let origin = if record.source_ip.is_empty() {
             record.account_label.clone()
@@ -731,10 +1031,10 @@ fn calls_cmd(store: &Store, args: CallsArgs) -> Result<()> {
             format!("{} {}", record.source_ip, record.account_label)
         };
         println!(
-            "{:<20} {:<26} {:<6} {:>8} {:>8} {:<8} {}",
+            "{:<16} {:<24} {:<7} {:>7} {:>7} {:<6} {}",
             when,
-            record.model,
-            if record.outcome == "ok" { "OK" } else { "FAIL" },
+            truncate(&record.model, 24),
+            result,
             record.prompt_tokens,
             record.completion_tokens,
             format!("{:.2}", record.credits),
@@ -744,21 +1044,67 @@ fn calls_cmd(store: &Store, args: CallsArgs) -> Result<()> {
     Ok(())
 }
 
+/// 导出当前账号的凭证，方便接别的工具（原 Android 版把这份写到
+/// `/data/local/tmp/wb-hub/wb-auth.json`）。
+fn export_cmd(store: &Store, args: ExportArgs) -> Result<()> {
+    let account = store
+        .active()
+        .ok_or_else(|| anyhow::anyhow!("还没有登录，运行 `wbhub login` 后再试"))?;
+    let payload = json!({
+        "accessToken": account.access_token,
+        "refreshToken": account.refresh_token,
+        "expiresAt": account.expires_at,
+        "domain": account.domain,
+        "uid": account.uid,
+        "nickname": account.nickname,
+        "enterpriseId": account.enterprise_id,
+        "region": account.region().name(),
+        "id": account.id,
+    });
+    let text = serde_json::to_string_pretty(&payload)?;
+    match args.out {
+        Some(path) => {
+            crate::store::write_private(&path, &text)?;
+            println!("已写出 {}", path.display());
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
+}
+
 fn config_cmd(store: &Store, args: ConfigArgs) -> Result<()> {
     let mut settings = Settings::load(store.dir())?;
     for assignment in &args.set {
         let (key, value) = assignment
             .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("--set 需要 KEY=VALUE 形式，收到 {assignment:?}"))?;
+            .ok_or_else(|| anyhow::anyhow!("--set 需要「键=值」形式，收到 {assignment:?}"))?;
         match key.trim() {
-            "port" => settings.port = value.trim().parse().context("port 需要数字")?,
+            "port" => settings.port = value.trim().parse().context("port 需要是数字")?,
             "lan_enabled" => settings.lan_enabled = parse_bool(value)?,
-            "call_log_limit" => settings.call_log_limit = value.trim().parse().context("call_log_limit 需要数字")?,
-            "refresh_minutes" => settings.refresh_minutes = value.trim().parse().context("refresh_minutes 需要数字")?,
+            "call_log_limit" => {
+                settings.call_log_limit = value.trim().parse().context("call_log_limit 需要是数字")?
+            }
+            "refresh_minutes" => {
+                settings.refresh_minutes = value.trim().parse().context("refresh_minutes 需要是数字")?
+            }
             "verbose" => settings.verbose = parse_bool(value)?,
-            "api_key" => settings.api_key = value.trim().to_string(),
-            "lan_key" => settings.lan_key = value.trim().to_string(),
-            other => bail!("未知设置项 {other}；可用：port, lan_enabled, lan_key, api_key, call_log_limit, refresh_minutes, verbose"),
+            "api_key" => {
+                let key = value.trim();
+                if key.is_empty() {
+                    bail!("api_key 不能为空；想生成新 key 用 --rotate-key");
+                }
+                settings.api_key = key.to_string();
+            }
+            "lan_key" => {
+                let key = value.trim();
+                if key.is_empty() {
+                    bail!("lan_key 不能为空；想生成新 key 用 --rotate-lan-key");
+                }
+                settings.lan_key = key.to_string();
+            }
+            other => bail!(
+                "未知设置项 {other}；可用：port、lan_enabled、lan_key、api_key、call_log_limit、refresh_minutes、verbose"
+            ),
         }
     }
     let mut changed = !args.set.is_empty();
@@ -774,6 +1120,7 @@ fn config_cmd(store: &Store, args: ConfigArgs) -> Result<()> {
     }
     if changed {
         settings.save(store.dir())?;
+        println!("设置已保存。");
     }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&settings)?);
@@ -783,14 +1130,14 @@ fn config_cmd(store: &Store, args: ConfigArgs) -> Result<()> {
 
 fn parse_bool(value: &str) -> Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
+        "1" | "true" | "yes" | "on" | "开" => Ok(true),
+        "0" | "false" | "no" | "off" | "关" => Ok(false),
         other => bail!("{other:?} 不是布尔值"),
     }
 }
 
-/// Resolves the account to act on, refreshing the token when it is close to
-/// expiry so a scripted `wbhub balance` does not fail on a stale token.
+/// 解析出要操作的账号；快过期就先续一次，免得脚本化的 `wbhub balance` 因为
+/// 陈旧 token 挂掉。
 async fn resolve_active(store: &Store) -> Result<crate::store::SavedAccount> {
     let account = store
         .active()
@@ -801,8 +1148,7 @@ async fn resolve_active(store: &Store) -> Result<crate::store::SavedAccount> {
     Ok(refresh_and_store(store, &account).await)
 }
 
-/// Refreshes a credential and writes the result back, used by both the CLI and
-/// the bridge when a token is close to expiry.
+/// 续期凭证并写回，CLI 和桥都会用到。
 pub async fn refresh_and_store(
     store: &Store,
     account: &crate::store::SavedAccount,
@@ -812,9 +1158,8 @@ pub async fn refresh_and_store(
             let _ = store.update_tokens(account, &renewed);
             renewed
         }
-        // A failed renewal still returns the existing token when it has not yet
-        // expired, so an unreachable refresh endpoint does not take a working
-        // session down.
+        // 续期失败时只要原 token 还没过期就继续用它，免得一个连不上的续期接口
+        // 把本来能用的会话弄停。
         Err(error) => {
             eprintln!("token 刷新失败，继续使用现有 token：{error}");
             account.clone()
@@ -822,12 +1167,36 @@ pub async fn refresh_and_store(
     }
 }
 
-/// The call record a dry run would produce, for `--dry-run` style checks.
-pub fn sample_record() -> CallRecord {
-    CallRecord::failed(0, "none", "")
+/// 把 epoch 秒格式化成好读的本地时间。
+///
+/// 非正值在这套代码里一律表示「不知道」而不是 1970 年：上游没给
+/// `expiresAt` 时字段就是 0，把它印成 1970 只会让人以为 token 早就过期了。
+pub fn clock_of(epoch_seconds: i64) -> String {
+    if epoch_seconds <= 0 {
+        return "-".to_string();
+    }
+    chrono::DateTime::from_timestamp(epoch_seconds, 0)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "-".to_string())
 }
 
-/// Reports the effective wire settings, used by `wbhub config --json`.
+/// 按显示宽度截断，避免表格被账号昵称挤歪。
+fn truncate(text: &str, width: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= width {
+        return text.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    let mut out: String = chars[..keep].iter().collect();
+    out.push('…');
+    out
+}
+
+/// 给 `wbhub config --json` 附带的协议摘要。
 pub fn wire_summary(region: Region) -> serde_json::Value {
     json!({
         "region": region.name(),
@@ -835,6 +1204,11 @@ pub fn wire_summary(region: Region) -> serde_json::Value {
         "billing_base": region.billing_base(),
         "client_ua": wire::CLIENT_UA,
     })
+}
+
+/// 一条空记录，给测试和未来的干跑用。
+pub fn sample_record() -> CallRecord {
+    CallRecord::failed(0, "none", "")
 }
 
 #[cfg(test)]
@@ -852,10 +1226,10 @@ mod tests {
 
     #[test]
     fn booleans_accept_the_usual_spellings() {
-        for value in ["1", "true", "YES", "on"] {
+        for value in ["1", "true", "YES", "on", "开"] {
             assert!(parse_bool(value).unwrap());
         }
-        for value in ["0", "false", "No", "off"] {
+        for value in ["0", "false", "No", "off", "关"] {
             assert!(!parse_bool(value).unwrap());
         }
         assert!(parse_bool("maybe").is_err());
@@ -877,5 +1251,32 @@ mod tests {
     fn the_data_dir_flag_is_global() {
         let cli = Cli::try_parse_from(["wbhub", "--data-dir", "/x", "status"]).unwrap();
         assert_eq!(cli.data_dir, Some(PathBuf::from("/x")));
+    }
+
+    #[test]
+    fn help_text_is_chinese() {
+        // The audience reads Chinese; an English-only CLI in a Chinese project is
+        // a usability bug, not a localisation gap.
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+        assert!(help.contains("登录"), "help should mention 登录:\n{help}");
+        assert!(help.contains("端点"), "help should mention 端点:\n{help}");
+    }
+
+    #[test]
+    fn truncation_keeps_the_display_width() {
+        assert_eq!(truncate("abc", 5), "abc");
+        assert_eq!(truncate("abcdef", 4), "abc…");
+        assert_eq!(truncate("中文昵称很长", 4), "中文昵…");
+    }
+
+    #[test]
+    fn clocks_render_or_fall_back() {
+        // A real timestamp renders as a local date; a negative one is not a
+        // timestamp at all and must not be printed as a confident 1969.
+        assert!(clock_of(1_700_000_000).starts_with("2023"));
+        assert_eq!(clock_of(0), "-", "0 means 'unknown', not 1970");
+        assert_eq!(clock_of(-1), "-");
     }
 }

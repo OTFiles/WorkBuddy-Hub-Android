@@ -178,7 +178,6 @@ wbhub serve --lan
 wbhub status              # 当前账号、端口、key
 wbhub balance             # 剩余额度
 wbhub balance --json      # 给脚本用
-wbhub checkin             # 每日签到
 wbhub models --ids        # 只列模型名
 wbhub accounts            # 所有账号（* 标记当前使用的）
 wbhub use 8a433605        # 按 id / 昵称 / 前缀切换
@@ -187,7 +186,32 @@ wbhub calls --summary     # 调用次数 / token / 积分汇总
 wbhub config --json       # 看设置
 wbhub config --set port=9000
 wbhub config --rotate-key
+wbhub export --out auth.json    # 导出凭证给别的工具
 ```
+
+### 6. 签到与成长中心
+
+```sh
+wbhub checkin             # 只签到
+wbhub daily               # 补签 → 礼包/补偿 → 兑换连登档位 → 抽奖
+wbhub daily --with-checkin --with-travel   # 顺手签到 + 推猫猫旅行
+wbhub travel              # 派出猫猫 / 到站后领取
+wbhub travel --status     # 只看猫在哪
+wbhub tasks               # 成长任务进度
+wbhub night --status      # 夜猫子任务进度
+wbhub night               # 上报夜猫子（仅 23:00–08:00 有效）
+```
+
+成长中心只有国内版账号有；国际版会直接告诉你没有。这些动作在上游都是幂等的，
+所以 `wbhub daily` 可以每天重复跑、也可以塞进 cron：
+
+```sh
+# 每天 9 点签到并领完当日奖励
+0 9 * * * WBHUB_DIR=$PREFIX/var/lib/wbhub $PREFIX/bin/wbhub daily --with-checkin >> $PREFIX/var/log/wbhub.log 2>&1
+```
+
+`cronie` 在 Termux 里要 `pkg install cronie && crond`；不想装 cron 的话用
+`termux-job-scheduler` 也行。
 
 数据都在 `$PREFIX/var/lib/wbhub/`（可用 `--data-dir` 或 `WBHUB_DIR` 改）：
 
@@ -216,6 +240,8 @@ calls.jsonl          调用记录
   写进调用记录。
 * **双层鉴权 + 入站加固** —— 本机/LAN 两把 key；`Host` 与 `Origin` 必须指向本机或私有
   网段，请求体必须是 JSON（否则一个跨站表单就能触发一次付费调用）。
+* **成长中心** —— 连登补签、档位兑换、抽奖、猫猫旅行、夜猫子、成长任务，接口与顺序
+  都照搬原实现（补签优先、兑换发抽奖次数所以抽奖在最后）。
 
 改动了的：
 
@@ -228,11 +254,27 @@ calls.jsonl          调用记录
 | 调用记录 | SQLite | JSONL（`jq` 直接能读） |
 | 模型名册 | 内存缓存 | 内存缓存 + 定时刷新 |
 | 多账号轮换 | 有 | **没有**，一次服务一个账号 |
-| 签到/成长任务 | 有 | 只有 `checkin`；成长任务未移植 |
+| 签到/成长任务 | 有（自动） | 有（`daily` / `travel` / `night`，手动或 cron 触发） |
 | 内置 Agent 页 | 有 | 没有（终端里用别的客户端就行） |
 
-最后三项是有意不做的：轮换和成长任务更适合放在 `workbuddy2api-panel` 那种多账号网关
-里，而这个项目的定位是「手机上一个干净的单账号端点」。
+轮换是有意不做的：它更适合放在 `workbuddy2api-panel` 那种多账号网关里，而这个项目
+的定位是「手机上一个干净的单账号端点」。
+
+### 另外顺手修掉的几个原版问题
+
+移植过程中有几处原实现的行为会让人踩坑，这里一并改掉：
+
+| 问题 | 原实现 | 这边 |
+|---|---|---|
+| `stream: false` 的客户端 | 一律回 SSE，客户端解析失败 | 攒成完整的 `chat.completion` 再返回 |
+| 非 JSON 响应 | 当成成功（`Step(true, text)`），于是一个 401 会显示「礼包已领取」 | 一律算失败并说明原因 |
+| 会话过期 | 报「返回了非 JSON」加一页 HTML | 报「账号会话已失效（HTTP 401），请重新运行 `wbhub login`」 |
+| 错误详情 | 整页 HTML 塞进调用记录，撑坏表格 | 压成一行可读的话 |
+| 分块请求体 | 只查 `Content-Length`，chunked 无上限 | `Limited` 硬截断，超限直接 413 |
+| 连接超时 | 30 秒 socket 超时 | 30 秒请求头超时 + 90 秒上游静默超时 |
+| 客户端中途断开 | 记录丢失 | `Drop` 里补一条 `aborted` 记录 |
+| `wbhub models \| head` | panic（Rust 默认忽略 SIGPIPE） | 恢复 SIGPIPE 默认处置，安静退出 |
+| 模型列表拉取失败 | `/v1/models` 一直空 | 空的时候懒加载重试一次 |
 
 ---
 

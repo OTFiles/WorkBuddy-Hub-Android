@@ -35,15 +35,17 @@ fn apply_headers(
     request
 }
 
-/// Sends a request and returns the body as text, including non-2xx bodies:
-/// the upstream reports most business failures in prose inside a 200 or a 4xx
-/// envelope, and both are classified from the body rather than the status alone.
-pub async fn request_json(
+/// Sends a request and returns the status alongside the body.
+///
+/// Callers that need to tell "the session is dead" apart from "the upstream sent
+/// something odd" cannot do it from the body alone: a 401 arrives as an HTML page
+/// from the gateway, which would otherwise be reported as "not JSON".
+pub async fn request_with_status(
     url: &str,
     method: &str,
     headers: &wire::Headers,
     body: Option<&str>,
-) -> Result<String> {
+) -> Result<(u16, String)> {
     let request = match method {
         "GET" => client().get(url),
         "POST" => {
@@ -53,18 +55,31 @@ pub async fn request_json(
             }
             request
         }
-        other => anyhow::bail!("unsupported method {other}"),
+        other => anyhow::bail!("不支持的请求方法 {other}"),
     };
     let request = apply_headers(request, headers);
     let response = request
         .send()
         .await
         .with_context(|| format!("{method} {url}"))?;
-    let status = response.status();
+    let status = response.status().as_u16();
     let text = response
         .text()
         .await
         .with_context(|| format!("reading the body of {method} {url} (HTTP {status})"))?;
+    Ok((status, text))
+}
+
+/// Sends a request and returns the body as text, including non-2xx bodies:
+/// the upstream reports most business failures in prose inside a 200 or a 4xx
+/// envelope, and both are classified from the body rather than the status alone.
+pub async fn request_json(
+    url: &str,
+    method: &str,
+    headers: &wire::Headers,
+    body: Option<&str>,
+) -> Result<String> {
+    let (_, text) = request_with_status(url, method, headers, body).await?;
     Ok(text)
 }
 

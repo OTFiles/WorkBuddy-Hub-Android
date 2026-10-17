@@ -196,6 +196,36 @@ pub fn display_error(body: &str) -> Option<String> {
     }
 }
 
+/// 把一段错误响应体收敛成一句人能读的话。
+///
+/// 上游出错时可能返回三种东西：带 `displayMsg` 的 JSON、一页网关 HTML、或者纯
+/// 文本。直接透传 HTML 会把客户端的日志和这里的调用记录都撑成一堆标签，所以按
+/// 形状挑一句最有信息量的话出来。
+pub fn human_error(status: u16, body: &str) -> String {
+    if let Some(message) = display_error(body) {
+        return message;
+    }
+    let trimmed = body.trim_start();
+    let looks_like_html = trimmed.starts_with('<');
+    if looks_like_html {
+        // 网关的 401/403 是一页 nginx/APISIX 的错误页，页面本身没信息量；真正
+        // 有用的信息是「会话没了」。
+        return match status {
+            401 | 403 => format!("账号会话已失效（HTTP {status}），请重新登录"),
+            404 => format!("上游没有这个接口（HTTP {status}）"),
+            s if s >= 500 => format!("上游网关错误（HTTP {s}）"),
+            s => format!("上游返回了错误页（HTTP {s}）"),
+        };
+    }
+    // 纯文本：把换行和连续空白压成单个空格，免得一条记录占好几行。
+    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        format!("上游返回空响应（HTTP {status}）")
+    } else {
+        collapsed.chars().take(200).collect()
+    }
+}
+
 // ---------------------------------------------------------------------- //
 // Request body shaping
 // ---------------------------------------------------------------------- //
@@ -856,6 +886,26 @@ mod tests {
         assert_eq!(classify(429, ""), ErrorKind::SoftRate);
         assert_eq!(classify(500, ""), ErrorKind::Server);
         assert_eq!(classify(400, "bad request"), ErrorKind::Client);
+    }
+
+    #[test]
+    fn a_gateway_error_page_becomes_one_readable_line() {
+        let body = "<html>\r\n<head><title>401 Authorization Required</title></head>\r\n</html>";
+        let text = human_error(401, body);
+        assert!(text.contains("会话已失效"), "{text}");
+        assert!(!text.contains('<'), "no markup should leak through: {text}");
+        assert!(!text.contains('\n'), "no newlines: {text}");
+    }
+
+    #[test]
+    fn a_plain_text_error_is_collapsed_onto_one_line() {
+        let text = human_error(400, "bad   request\n\nretry later");
+        assert_eq!(text, "bad request retry later");
+    }
+
+    #[test]
+    fn an_empty_body_still_says_something() {
+        assert_eq!(human_error(502, "   "), "上游返回空响应（HTTP 502）");
     }
 
     #[test]

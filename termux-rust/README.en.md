@@ -192,7 +192,25 @@ wbhub calls --summary     # totals: calls, tokens, credit
 wbhub config --json
 wbhub config --set port=9000
 wbhub config --rotate-key
+wbhub export --out auth.json    # hand the credential to another tool
 ```
+
+### 6. Check-in and the growth centre
+
+```sh
+wbhub checkin             # check-in only
+wbhub daily               # makeup card → gifts → streak tiers → lottery
+wbhub daily --with-checkin --with-travel   # plus check-in and the cat's trip
+wbhub travel              # send the cat out / collect on arrival
+wbhub travel --status     # where is the cat
+wbhub tasks               # growth task progress
+wbhub night --status      # night-owl task progress
+wbhub night               # report night-owl activity (23:00–08:00 only)
+```
+
+The growth centre exists only on CN accounts; a global account is told so plainly.
+Every step is idempotent upstream, so `wbhub daily` can be re-run daily or put in
+cron.
 
 State lives in `$PREFIX/var/lib/wbhub/` (override with `--data-dir` or
 `WBHUB_DIR`):
@@ -229,6 +247,9 @@ Kept, deliberately, line for line:
 * **Usage scanned while forwarding.** The upstream reports token counts and
   credit in a trailing frame; the relay reads it out of the same bytes it passes
   on, and records it.
+* **The growth centre.** Makeup cards, tier redemption, the lottery, the cat's
+  travel, the night-owl task and the task list — including the original's
+  ordering (makeup first, redemptions before the draws they grant).
 * **Two-layer auth and inbound hardening.** Separate local and LAN keys;
   `Host` and `Origin` must name this device or a private address; bodies must be
   JSON — otherwise a cross-site form post could drive a paid model call.
@@ -244,12 +265,26 @@ Changed:
 | Call log | SQLite | JSONL, readable with `jq` |
 | Model roster | in-memory cache | in-memory cache + periodic refresh |
 | Account rotation | yes | **no** — one account per running server |
-| Check-in / growth tasks | yes | `checkin` only; growth tasks not ported |
+| Check-in / growth tasks | yes (automatic) | yes (`daily` / `travel` / `night`, manual or cron) |
 | Built-in agent page | yes | no — use any client you like in the terminal |
 
-The last three are deliberate omissions: rotation and growth tasks belong in a
-multi-account gateway such as `workbuddy2api-panel`, whereas this project is
-meant to be one clean single-account endpoint on a phone.
+Rotation is the one deliberate omission: it belongs in a multi-account gateway
+such as `workbuddy2api-panel`, whereas this project is meant to be one clean
+single-account endpoint on a phone.
+
+### Original behaviours this port also fixes
+
+| Problem | Original | Here |
+|---|---|---|
+| A client sending `stream: false` | gets SSE anyway, fails to parse | frames are assembled into one `chat.completion` |
+| A non-JSON response | treated as success (`Step(true, text)`), so a 401 displayed "gift already claimed" | treated as a failure, with the reason |
+| An expired session | "returned non-JSON" plus an HTML page | "account session expired (HTTP 401), run `wbhub login`" |
+| Error detail in the call log | whole HTML page, wrecking the table | collapsed onto one readable line |
+| Chunked request bodies | only `Content-Length` was checked, so unbounded | `Limited` truncates at the ceiling and returns 413 |
+| Connection timeouts | 30s socket timeout | 30s header-read timeout + 90s upstream stall timeout |
+| A client disconnecting mid-answer | the call vanished from the log | a `Drop` impl records it as `aborted` |
+| `wbhub models \| head` | panicked (Rust ignores SIGPIPE by default) | SIGPIPE restored, exits quietly |
+| Model list fetch failure | `/v1/models` stayed empty | one lazy retry when empty |
 
 ---
 

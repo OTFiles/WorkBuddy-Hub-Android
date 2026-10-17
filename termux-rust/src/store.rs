@@ -195,8 +195,7 @@ pub struct Store {
 impl Store {
     pub fn open(dir: impl AsRef<Path>) -> Result<Store> {
         let dir = dir.as_ref().to_path_buf();
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("creating data directory {}", dir.display()))?;
+        fs::create_dir_all(&dir).with_context(|| format!("创建数据目录 {}", dir.display()))?;
         Ok(Store { dir })
     }
 
@@ -363,7 +362,7 @@ impl Store {
             .or_else(|| accounts.iter().find(|a| a.nickname == needle))
             .or_else(|| accounts.iter().find(|a| a.id.starts_with(needle)))
             .or_else(|| accounts.iter().find(|a| a.uid.starts_with(needle)))
-            .ok_or_else(|| anyhow!("no account in {} matches {needle:?}", region.label()))?;
+            .ok_or_else(|| anyhow!("{}里没有匹配 {needle:?} 的账号", region.label()))?;
         self.set_active(region, &found.id)?;
         Ok(found.clone())
     }
@@ -432,16 +431,16 @@ impl Store {
 /// on the device drive the account.
 pub fn write_private(path: &Path, text: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("创建 {}", parent.display()))?;
     }
     let temporary = path.with_extension("tmp");
-    fs::write(&temporary, text).with_context(|| format!("writing {}", temporary.display()))?;
+    fs::write(&temporary, text).with_context(|| format!("写入 {}", temporary.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600));
     }
-    fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))?;
+    fs::rename(&temporary, path).with_context(|| format!("替换 {}", path.display()))?;
     Ok(())
 }
 

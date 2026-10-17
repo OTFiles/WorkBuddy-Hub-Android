@@ -80,10 +80,10 @@ pub async fn fetch_models(account: &SavedAccount) -> Result<Vec<wire::ProtoModel
         headers.push(("User-Agent", wire::CLIENT_UA.to_string()));
     }
     let url = format!("{}/v3/config", region.chat_base());
-    let text = http::request_json(&url, "GET", &headers, None).await?;
+    let text = send(&url, "GET", &headers, None).await?;
     let envelope = Envelope::parse(&text)?;
     if envelope.code != 0 {
-        bail!("catalog refused: {}", envelope.msg);
+        bail!("模型列表被拒绝：{}", envelope.msg);
     }
     wire::parse_models(&text).map_err(|e| anyhow::anyhow!(e))
 }
@@ -126,10 +126,10 @@ async fn fetch_personal_credits(account: &SavedAccount) -> Result<Balance> {
         &account.domain,
         account.enterprise_id(),
     );
-    let text = http::request_json(&url, "POST", &headers, Some(&body)).await?;
+    let text = send(&url, "POST", &headers, Some(&body)).await?;
     let envelope = Envelope::parse(&text)?;
     if envelope.code != 0 {
-        bail!("billing refused: {}", envelope.msg);
+        bail!("额度查询被拒绝：{}", envelope.msg);
     }
     let inner = envelope
         .data
@@ -210,10 +210,10 @@ async fn fetch_enterprise_credits(account: &SavedAccount) -> Result<Balance> {
         &account.domain,
         account.enterprise_id(),
     );
-    let text = http::request_json(&url, "POST", &headers, Some("")).await?;
+    let text = send(&url, "POST", &headers, Some("")).await?;
     let envelope = Envelope::parse(&text)?;
     if envelope.code != 0 {
-        bail!("enterprise billing refused: {}", envelope.msg);
+        bail!("企业额度查询被拒绝：{}", envelope.msg);
     }
     // The official reader accepts the payload at data.data, data, or the
     // envelope itself, so all three are tried.
@@ -253,8 +253,7 @@ async fn fetch_enterprise_credits(account: &SavedAccount) -> Result<Balance> {
     }
     // No recognisable quota field is a hard error: reporting 0 would be a
     // confident wrong number rather than a visible failure.
-    let resolved_limit =
-        limit.ok_or_else(|| anyhow::anyhow!("enterprise billing carried no quota field"))?;
+    let resolved_limit = limit.ok_or_else(|| anyhow::anyhow!("企业额度响应里没有额度字段"))?;
     if resolved_limit == -1.0 {
         return Ok(Balance {
             total: 0.0,
@@ -269,8 +268,7 @@ async fn fetch_enterprise_credits(account: &SavedAccount) -> Result<Balance> {
             unlimited: true,
         });
     }
-    let resolved_used =
-        used.ok_or_else(|| anyhow::anyhow!("enterprise billing carried a limit but no usage"))?;
+    let resolved_used = used.ok_or_else(|| anyhow::anyhow!("企业额度响应里有额度但没有用量"))?;
     let remain = (resolved_limit - resolved_used).max(0.0);
     Ok(Balance {
         total: remain,
@@ -299,7 +297,7 @@ pub async fn checkin(account: &SavedAccount) -> Result<CheckinOutcome> {
         &account.domain,
         account.enterprise_id(),
     );
-    let text = http::request_json(&url, "POST", &headers, Some("{}")).await?;
+    let text = send(&url, "POST", &headers, Some("{}")).await?;
     let envelope = Envelope::parse(&text)?;
     Ok(CheckinOutcome {
         ok: envelope.code == 0,
@@ -309,6 +307,23 @@ pub async fn checkin(account: &SavedAccount) -> Result<CheckinOutcome> {
             envelope.msg
         },
     })
+}
+
+/// 发一个 JSON 请求，并把「会话失效」从「返回异常」里分出来。
+///
+/// 网关的 401 是一页 HTML，如果只看 body 就只能报「非 JSON」，那对用户毫无
+/// 帮助：真正要做的是重新登录。
+async fn send(
+    url: &str,
+    method: &str,
+    headers: &wire::Headers,
+    body: Option<&str>,
+) -> Result<String> {
+    let (status, text) = http::request_with_status(url, method, headers, body).await?;
+    if status == 401 || status == 403 {
+        bail!("账号会话已失效（HTTP {status}），请重新运行 `wbhub login`");
+    }
+    Ok(text)
 }
 
 fn number(row: &Value, key: &str) -> f64 {
@@ -332,7 +347,7 @@ impl Envelope {
     fn parse(text: &str) -> Result<Envelope> {
         let document: Value = serde_json::from_str(text).map_err(|_| {
             anyhow::anyhow!(
-                "upstream returned non-JSON: {}",
+                "上游返回了非 JSON：{}",
                 text.chars().take(160).collect::<String>()
             )
         })?;

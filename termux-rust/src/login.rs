@@ -66,7 +66,7 @@ pub async fn start(region: Region) -> Result<Session> {
         .with_context(|| format!("auth/state returned: {}", preview(&text)))?;
     let data = payload
         .get("data")
-        .ok_or_else(|| anyhow!("auth/state returned no data: {}", preview(&text)))?;
+        .ok_or_else(|| anyhow!("auth/state 没有返回 data：{}", preview(&text)))?;
     let state = data
         .get("state")
         .and_then(Value::as_str)
@@ -78,7 +78,7 @@ pub async fn start(region: Region) -> Result<Session> {
         .unwrap_or("")
         .to_string();
     if state.is_empty() || auth_url.is_empty() {
-        bail!("auth/state returned no state/authUrl: {}", preview(&text));
+        bail!("auth/state 没有返回 state/authUrl：{}", preview(&text));
     }
     Ok(Session {
         state,
@@ -110,7 +110,7 @@ pub async fn poll(session: &Session) -> Result<Poll> {
             .get("msg")
             .and_then(Value::as_str)
             .unwrap_or("unknown refusal");
-        bail!("sign-in refused: {msg}");
+        bail!("登录被拒绝：{msg}");
     }
     let Some(data) = payload.get("data") else {
         return Ok(Poll::Pending);
@@ -194,7 +194,7 @@ pub async fn refresh(account: &SavedAccount) -> Result<SavedAccount> {
             .get("msg")
             .and_then(Value::as_str)
             .unwrap_or("unknown refusal");
-        bail!("refresh refused: {msg}");
+        bail!("续期被拒绝：{msg}");
     }
     let data = payload.get("data").cloned().unwrap_or_else(|| json!({}));
     let access_token = data
@@ -203,7 +203,7 @@ pub async fn refresh(account: &SavedAccount) -> Result<SavedAccount> {
         .unwrap_or("")
         .to_string();
     if access_token.is_empty() {
-        bail!("refresh returned no access token");
+        bail!("续期没有返回 access token");
     }
     let expires_in = data.get("expiresIn").and_then(Value::as_i64).unwrap_or(0);
     let mut renewed = account.clone();
