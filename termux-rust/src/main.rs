@@ -6,27 +6,13 @@ use clap::{CommandFactory, FromArgMatches};
 
 use wbhub::cli;
 
-/// 把 SIGPIPE 的处置方式交回系统默认。
-///
-/// Rust 启动时把 SIGPIPE 设成忽略，于是写入已经关闭的管道会变成 EPIPE 错误，而
-/// `println!` 遇到错误会 panic。`wbhub models | head` 或者 `| grep` 是最常见的
-/// 用法，必须像普通命令行工具那样安静退出。
-#[cfg(unix)]
-fn restore_default_sigpipe() {
-    // SAFETY: 只调用 signal(2) 把 SIGPIPE 恢复成 SIG_DFL，不涉及任何内存或
-    // 生命周期，进程启动早期执行一次。
-    #[allow(unsafe_code)]
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
-}
-
-#[cfg(not(unix))]
-fn restore_default_sigpipe() {}
+// 这里特意不去动 SIGPIPE：保持 Rust 的默认（忽略），再配合 crate 里的 `say!`
+// 宏把写入错误吞掉。恢复成 SIG_DFL 会让进程在管道下游关闭时被信号直接杀掉，
+// 于是 SIGTERM/SIGHUP 那条清理路径（释放 Termux 唤醒锁）根本走不到。
+// 见 lib.rs 里 `say!` 的说明。
 
 #[tokio::main]
 async fn main() {
-    restore_default_sigpipe();
     let mut args: Vec<OsString> = std::env::args_os().collect();
     // `help 子命令` 是习惯用法，但 clap 自动生成的 help 子命令只有英文描述，所以
     // 关掉它，在这里把两种写法都折算成 `子命令 --help`。
@@ -45,7 +31,7 @@ async fn main() {
                 clap::error::ErrorKind::DisplayHelp
                 | clap::error::ErrorKind::DisplayVersion
                 | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
-                    print!("{error}");
+                    wbhub::say!("{error}");
                 }
                 _ => eprint!("参数错误：{error}"),
             }
@@ -55,13 +41,13 @@ async fn main() {
     let parsed = match cli::Cli::from_arg_matches(&matches) {
         Ok(parsed) => parsed,
         Err(error) => {
-            eprint!("参数错误：{error}");
+            wbhub::say_err!("参数错误：{error}");
             std::process::exit(2);
         }
     };
 
     if let Err(error) = cli::run(parsed).await {
-        eprintln!("错误：{error:#}");
+        wbhub::say_err!("错误：{error:#}");
         std::process::exit(1);
     }
 }

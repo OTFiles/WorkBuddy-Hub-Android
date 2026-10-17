@@ -321,7 +321,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::ClearCalls => {
             let log = crate::calllog::CallLog::open(store.dir(), 1);
             log.clear()?;
-            println!("调用记录已清空。");
+            crate::say!("调用记录已清空。");
             Ok(())
         }
         Command::Export(args) => export_cmd(&store, args),
@@ -331,19 +331,19 @@ pub async fn run(cli: Cli) -> Result<()> {
 
 async fn login_cmd(store: &Store, args: LoginArgs) -> Result<()> {
     let region = args.region;
-    println!("正在为{}申请登录…", region.label());
+    crate::say!("正在为{}申请登录…", region.label());
     let session = login::start(region).await.context("无法开始登录")?;
-    println!();
-    println!("请在浏览器中打开下面的链接完成登录：");
-    println!();
-    println!("  {}", session.auth_url);
-    println!();
-    println!("{}", login::device_hint());
-    println!();
+    crate::say!();
+    crate::say!("请在浏览器中打开下面的链接完成登录：");
+    crate::say!();
+    crate::say!("  {}", session.auth_url);
+    crate::say!();
+    crate::say!("{}", login::device_hint());
+    crate::say!();
     if !args.no_open {
         open_url(&session.auth_url);
     }
-    println!("等待登录完成（最多 {} 秒）…", args.timeout);
+    crate::say!("等待登录完成（最多 {} 秒）…", args.timeout);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.timeout);
     let mut last_tick = std::time::Instant::now();
@@ -357,13 +357,13 @@ async fn login_cmd(store: &Store, args: LoginArgs) -> Result<()> {
         match login::poll(&session).await {
             Ok(login::Poll::Done(account)) => {
                 let saved = store.save(region, *account)?;
-                println!();
-                println!("登录成功：{}（{}）", saved.label(), saved.id);
+                crate::say!();
+                crate::say!("登录成功：{}（{}）", saved.label(), saved.id);
                 if saved.expires_at > 0 {
-                    println!("Token 有效期至 {}", clock_of(saved.expires_at));
+                    crate::say!("Token 有效期至 {}", clock_of(saved.expires_at));
                 }
-                println!();
-                println!("下一步：wbhub serve");
+                crate::say!();
+                crate::say!("下一步：wbhub serve");
                 return Ok(());
             }
             Ok(login::Poll::Pending) => {}
@@ -375,9 +375,11 @@ async fn login_cmd(store: &Store, args: LoginArgs) -> Result<()> {
         }
         if last_tick.elapsed() >= std::time::Duration::from_secs(10) {
             last_tick = std::time::Instant::now();
-            print!(".");
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
+            {
+                use std::io::Write as _;
+                let _ = write!(std::io::stdout(), ".");
+                let _ = std::io::stdout().flush();
+            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
@@ -402,13 +404,17 @@ fn open_url(url: &str) {
 fn accounts_cmd(store: &Store) -> Result<()> {
     let accounts = store.all_accounts();
     if accounts.is_empty() {
-        println!("还没有账号，先运行：wbhub login");
+        crate::say!("还没有账号，先运行：wbhub login");
         return Ok(());
     }
     let active_id = store.active().map(|a| a.id).unwrap_or_default();
-    println!(
+    crate::say!(
         "{:<4} {:<8} {:<18} {:<10} {:<18} 标识",
-        "标记", "版本", "账号", "UID", "Token 到期"
+        "标记",
+        "版本",
+        "账号",
+        "UID",
+        "Token 到期"
     );
     for account in &accounts {
         let marker = if account.id == active_id { "*" } else { "" };
@@ -417,7 +423,7 @@ fn accounts_cmd(store: &Store) -> Result<()> {
         } else {
             "-".into()
         };
-        println!(
+        crate::say!(
             "{:<4} {:<8} {:<18} {:<10} {:<18} {}",
             marker,
             account.region().label(),
@@ -428,8 +434,8 @@ fn accounts_cmd(store: &Store) -> Result<()> {
         );
     }
     if let Some(active) = store.active() {
-        println!();
-        println!(
+        crate::say!();
+        crate::say!(
             "当前使用：{} · {}（{}）",
             active.region().label(),
             active.label(),
@@ -471,7 +477,7 @@ fn use_cmd(store: &Store, args: UseArgs) -> Result<()> {
     };
     let account = store.select(region, &args.account)?;
     store.set_active_region(region)?;
-    println!("已切换到 {}（{}）", account.label(), account.id);
+    crate::say!("已切换到 {}（{}）", account.label(), account.id);
     Ok(())
 }
 
@@ -500,7 +506,7 @@ fn logout_cmd(store: &Store, args: LogoutArgs) -> Result<()> {
                     .collect();
                 for id in targets {
                     if store.delete(*region, &id)? {
-                        println!("已删除 {} 的账号 {}", region.label(), id);
+                        crate::say!("已删除 {} 的账号 {}", region.label(), id);
                         removed += 1;
                     }
                 }
@@ -513,7 +519,7 @@ fn logout_cmd(store: &Store, args: LogoutArgs) -> Result<()> {
             for region in &regions {
                 for account in store.accounts(*region) {
                     store.delete(*region, &account.id)?;
-                    println!("已删除 {} 的账号 {}", region.label(), account.id);
+                    crate::say!("已删除 {} 的账号 {}", region.label(), account.id);
                 }
             }
         }
@@ -556,23 +562,23 @@ async fn serve_cmd(store: Store, args: ServeArgs) -> Result<()> {
         if lock.held() {
             Some(lock)
         } else {
-            eprintln!("提示：没能拿到 Termux 唤醒锁，息屏后可能被系统暂停。");
+            crate::say_err!("提示：没能拿到 Termux 唤醒锁，息屏后可能被系统暂停。");
             None
         }
     } else {
-        eprintln!(
+        crate::say_err!(
             "提示：没装 termux-wake-lock；建议 `pkg install termux-api` 并装 Termux:API 应用。"
         );
         None
     };
 
     if !bridge.store.has_any() {
-        eprintln!("提示：还没有登录任何账号，先运行 `wbhub login`，否则 /v1/chat/completions 会返回 401。");
+        crate::say_err!("提示：还没有登录任何账号，先运行 `wbhub login`，否则 /v1/chat/completions 会返回 401。");
     }
     if !args.no_refresh {
         match bridge.refresh_catalogue().await {
-            Ok(count) => println!("已载入 {count} 个模型。"),
-            Err(error) => eprintln!("模型列表获取失败（服务仍会启动）：{error}"),
+            Ok(count) => crate::say!("已载入 {count} 个模型。"),
+            Err(error) => crate::say_err!("模型列表获取失败（服务仍会启动）：{error}"),
         }
     }
 
@@ -581,24 +587,24 @@ async fn serve_cmd(store: Store, args: ServeArgs) -> Result<()> {
     } else {
         bind.as_str()
     };
-    println!();
-    println!("Base URL : http://{shown_host}:{}/v1", settings.port);
-    println!("API Key  : {}", settings.api_key);
+    crate::say!();
+    crate::say!("Base URL : http://{shown_host}:{}/v1", settings.port);
+    crate::say!("API Key  : {}", settings.api_key);
     if settings.lan_enabled {
-        println!("局域网   : 已开启，外部设备用下面的 Key");
-        println!("LAN Key  : {}", settings.lan_key);
+        crate::say!("局域网   : 已开启，外部设备用下面的 Key");
+        crate::say!("LAN Key  : {}", settings.lan_key);
         for address in local_ipv4_addresses() {
-            println!("           http://{address}:{}/v1", settings.port);
+            crate::say!("           http://{address}:{}/v1", settings.port);
         }
     } else {
-        println!("局域网   : 未开启（--lan 可开启）");
+        crate::say!("局域网   : 未开启（--lan 可开启）");
     }
     if wake.is_some() {
-        println!("唤醒锁   : 已持有（退出时自动释放）");
+        crate::say!("唤醒锁   : 已持有（退出时自动释放）");
     }
-    println!();
-    println!("按 Ctrl-C 停止。");
-    println!();
+    crate::say!();
+    crate::say!("按 Ctrl-C 停止。");
+    crate::say!();
 
     let refresh_task = {
         let bridge = std::sync::Arc::clone(&bridge);
@@ -611,10 +617,10 @@ async fn serve_cmd(store: Store, args: ServeArgs) -> Result<()> {
                 match bridge.refresh_catalogue().await {
                     Ok(count) => {
                         if bridge.settings.read().await.verbose {
-                            println!("模型列表已刷新（{count} 个）。");
+                            crate::say!("模型列表已刷新（{count} 个）。");
                         }
                     }
-                    Err(error) => eprintln!("模型列表刷新失败：{error}"),
+                    Err(error) => crate::say_err!("模型列表刷新失败：{error}"),
                 }
             }
         })
@@ -624,8 +630,8 @@ async fn serve_cmd(store: Store, args: ServeArgs) -> Result<()> {
     let outcome = tokio::select! {
         result = server => result,
         _ = shutdown_signal() => {
-            println!();
-            println!("已停止。");
+            crate::say!();
+            crate::say!("已停止。");
             Ok(())
         }
     };
@@ -635,20 +641,48 @@ async fn serve_cmd(store: Store, args: ServeArgs) -> Result<()> {
     outcome
 }
 
-/// Ctrl-C 或者 SIGTERM 都当作退出信号，这样 `tmux kill-window` / `kill` 也能走到
-/// 清理路径（主要是把唤醒锁放掉）。
+/// 收到任何一个「该收工了」的信号都走清理路径。
+///
+/// SIGHUP 一定要接：`tmux kill-session` 和关掉终端发的都是它，如果不接，进程会被
+/// 直接杀掉，而 Termux 的唤醒锁是按包名持有的——进程没了锁还在，白耗电。
 async fn shutdown_signal() {
     use tokio::signal::unix::{signal, SignalKind};
-    let mut terminate = match signal(SignalKind::terminate()) {
-        Ok(stream) => stream,
-        Err(_) => {
-            let _ = tokio::signal::ctrl_c().await;
-            return;
-        }
+    let mut terminate = signal(SignalKind::terminate()).ok();
+    let mut hangup = signal(SignalKind::hangup()).ok();
+    let mut interrupt = signal(SignalKind::interrupt()).ok();
+
+    let fallback = || async {
+        let _ = tokio::signal::ctrl_c().await;
     };
+    if terminate.is_none() && hangup.is_none() && interrupt.is_none() {
+        fallback().await;
+        return;
+    }
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = terminate.recv() => {}
+        _ = async {
+            match interrupt.as_mut() {
+                Some(stream) => {
+                    stream.recv().await;
+                }
+                None => std::future::pending().await,
+            }
+        } => {}
+        _ = async {
+            match terminate.as_mut() {
+                Some(stream) => {
+                    stream.recv().await;
+                }
+                None => std::future::pending().await,
+            }
+        } => {}
+        _ = async {
+            match hangup.as_mut() {
+                Some(stream) => {
+                    stream.recv().await;
+                }
+                None => std::future::pending().await,
+            }
+        } => {}
     }
 }
 
@@ -667,28 +701,28 @@ fn local_ipv4_addresses() -> Vec<String> {
 
 fn status_cmd(store: &Store) -> Result<()> {
     let settings = Settings::load(store.dir())?;
-    println!("数据目录 : {}", store.dir().display());
+    crate::say!("数据目录 : {}", store.dir().display());
     match store.active() {
         Some(account) => {
-            println!(
+            crate::say!(
                 "当前账号 : {}（{}）",
                 account.label(),
                 account.region().label()
             );
-            println!("账号标识 : {}", account.id);
+            crate::say!("账号标识 : {}", account.id);
             if account.expires_at > 0 {
-                println!("Token 到期 : {}", clock_of(account.expires_at));
+                crate::say!("Token 到期 : {}", clock_of(account.expires_at));
             }
             if account.needs_refresh() {
-                println!("Token : 已过期或即将过期（下次调用时会自动刷新）");
+                crate::say!("Token : 已过期或即将过期（下次调用时会自动刷新）");
             }
         }
-        None => println!("当前账号 : 未登录（运行 `wbhub login`）"),
+        None => crate::say!("当前账号 : 未登录（运行 `wbhub login`）"),
     }
-    println!("端口     : {}", settings.port);
-    println!("Base URL : http://127.0.0.1:{}/v1", settings.port);
-    println!("API Key  : {}", settings.api_key);
-    println!(
+    crate::say!("端口     : {}", settings.port);
+    crate::say!("Base URL : http://127.0.0.1:{}/v1", settings.port);
+    crate::say!("API Key  : {}", settings.api_key);
+    crate::say!(
         "局域网   : {}",
         if settings.lan_enabled {
             "已开启"
@@ -697,7 +731,7 @@ fn status_cmd(store: &Store) -> Result<()> {
         }
     );
     if settings.lan_enabled {
-        println!("LAN Key  : {}", settings.lan_key);
+        crate::say!("LAN Key  : {}", settings.lan_key);
     }
     Ok(())
 }
@@ -718,24 +752,27 @@ async fn balance_cmd(store: &Store, args: BalanceArgs) -> Result<()> {
                 "unlimited": a.unlimited,
             })).collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        crate::say!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
-    println!("账号：{}（{}）", account.label(), account.region().label());
+    crate::say!("账号：{}（{}）", account.label(), account.region().label());
     if balance.unlimited {
-        println!("额度：不限");
+        crate::say!("额度：不限");
         return Ok(());
     }
-    println!("剩余：{:.2}", balance.total);
+    crate::say!("剩余：{:.2}", balance.total);
     if !balance.cycle_end.is_empty() {
-        println!("周期结束：{}", balance.cycle_end);
+        crate::say!("周期结束：{}", balance.cycle_end);
     }
     if balance.accounts.len() > 1 {
-        println!();
+        crate::say!();
         for account in &balance.accounts {
-            println!(
+            crate::say!(
                 "  {:<28} 余 {:<10.2} 共 {:<10.2} {}",
-                account.name, account.remain, account.size, account.cycle_end
+                account.name,
+                account.remain,
+                account.size,
+                account.cycle_end
             );
         }
     }
@@ -746,24 +783,24 @@ async fn checkin_cmd(store: &Store, args: CheckinArgs) -> Result<()> {
     let account = resolve_active(store).await?;
     let outcome = upstream::checkin(&account).await?;
     if args.json {
-        println!(
+        crate::say!(
             "{}",
             serde_json::to_string_pretty(&json!({"ok": outcome.ok, "message": outcome.message}))?
         );
         return Ok(());
     }
     if outcome.ok {
-        println!("签到成功：{}", outcome.message);
+        crate::say!("签到成功：{}", outcome.message);
     } else {
-        println!("签到未完成：{}", outcome.message);
+        crate::say!("签到未完成：{}", outcome.message);
     }
     Ok(())
 }
 
 async fn daily_cmd(store: &Store, args: DailyArgs) -> Result<()> {
     let account = resolve_active(store).await?;
-    println!("账号：{}（{}）", account.label(), account.region().label());
-    println!();
+    crate::say!("账号：{}（{}）", account.label(), account.region().label());
+    crate::say!();
 
     let mut steps: Vec<growth::Step> = Vec::new();
     if args.with_checkin {
@@ -796,20 +833,20 @@ async fn travel_cmd(store: &Store, args: TravelArgs) -> Result<()> {
     if args.status {
         let status = growth::travel_status(&account).await?;
         if status.state.is_empty() {
-            println!("还没有猫；执行 `wbhub travel` 会先领养一只。");
+            crate::say!("还没有猫；执行 `wbhub travel` 会先领养一只。");
         } else if status.traveling() {
-            println!(
+            crate::say!(
                 "猫在路上，{} 到站（约 {} 分钟）",
                 clock_of(status.arrive_at),
                 status.minutes_until(crate::store::now_seconds())
             );
         } else if status.arrived() {
-            println!("猫已到站，执行 `wbhub travel` 领取奖励。");
+            crate::say!("猫已到站，执行 `wbhub travel` 领取奖励。");
         } else {
-            println!("猫在家（状态：{}）", status.state);
+            crate::say!("猫在家（状态：{}）", status.state);
         }
         if status.daily_limit_reached {
-            println!("今日已派出过。");
+            crate::say!("今日已派出过。");
         }
         return Ok(());
     }
@@ -823,11 +860,13 @@ async fn night_cmd(store: &Store, args: NightArgs) -> Result<()> {
     if args.status {
         match growth::task(&account, "black_cat").await? {
             Some(task) => {
-                println!(
+                crate::say!(
                     "夜猫子：{}/{}（状态 {}）",
-                    task.current, task.target, task.accept_status
+                    task.current,
+                    task.target,
+                    task.accept_status
                 );
-                println!(
+                crate::say!(
                     "当前{}夜猫子时段（23:00–08:00）",
                     if growth::in_night_window() {
                         "处于"
@@ -836,7 +875,7 @@ async fn night_cmd(store: &Store, args: NightArgs) -> Result<()> {
                     }
                 );
             }
-            None => println!("没找到夜猫子任务。"),
+            None => crate::say!("没找到夜猫子任务。"),
         }
         return Ok(());
     }
@@ -862,16 +901,16 @@ async fn tasks_cmd(store: &Store, args: TasksArgs) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        crate::say!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
     if tasks.is_empty() {
-        println!("没有成长任务（国际版账号没有成长中心）。");
+        crate::say!("没有成长任务（国际版账号没有成长中心）。");
         return Ok(());
     }
-    println!("{:<28} {:<10} {:<8} 状态", "任务", "进度", "还差");
+    crate::say!("{:<28} {:<10} {:<8} 状态", "任务", "进度", "还差");
     for task in &tasks {
-        println!(
+        crate::say!(
             "{:<28} {:<10} {:<8} {}",
             task.code,
             format!("{}/{}", task.current, task.target),
@@ -885,20 +924,20 @@ async fn tasks_cmd(store: &Store, args: TasksArgs) -> Result<()> {
 /// 把一串步骤打成「✓ / ✗ + 说明」，最后给个总计。
 fn report(steps: &[growth::Step]) {
     if steps.is_empty() {
-        println!("无可执行项。");
+        crate::say!("无可执行项。");
         return;
     }
     let mut ok = 0;
     for step in steps {
         if step.ok {
             ok += 1;
-            println!("  ✓ {}", step.message);
+            crate::say!("  ✓ {}", step.message);
         } else {
-            println!("  ✗ {}", step.message);
+            crate::say!("  ✗ {}", step.message);
         }
     }
-    println!();
-    println!("完成 {} / {} 项。", ok, steps.len());
+    crate::say!();
+    crate::say!("完成 {} / {} 项。", ok, steps.len());
 }
 
 async fn models_cmd(store: &Store, args: ModelsArgs) -> Result<()> {
@@ -924,16 +963,16 @@ async fn models_cmd(store: &Store, args: ModelsArgs) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        crate::say!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
     if args.ids {
         for model in &models {
-            println!("{}", model.id);
+            crate::say!("{}", model.id);
         }
         return Ok(());
     }
-    println!("{:<26} {:<10} {:<10} 标记", "模型", "倍率", "上下文");
+    crate::say!("{:<26} {:<10} {:<10} 标记", "模型", "倍率", "上下文");
     for model in &models {
         let rate = model.rate();
         let rate = if rate.is_empty() {
@@ -948,7 +987,7 @@ async fn models_cmd(store: &Store, args: ModelsArgs) -> Result<()> {
         if model.supports_images {
             marks.push("图片".into());
         }
-        println!(
+        crate::say!(
             "{:<26} {:<10} {:<10} {}",
             model.id,
             rate,
@@ -965,40 +1004,47 @@ fn calls_cmd(store: &Store, args: CallsArgs) -> Result<()> {
     if args.summary {
         let summary = log.summary()?;
         if args.json {
-            println!("{}", serde_json::to_string_pretty(&summary)?);
+            crate::say!("{}", serde_json::to_string_pretty(&summary)?);
             return Ok(());
         }
-        println!(
+        crate::say!(
             "调用 {} 次（成功 {} / 失败 {}）",
-            summary.calls, summary.succeeded, summary.failed
+            summary.calls,
+            summary.succeeded,
+            summary.failed
         );
-        println!(
+        crate::say!(
             "Tokens：输入 {}，输出 {}，合计 {}",
             summary.prompt_tokens,
             summary.completion_tokens,
             summary.prompt_tokens + summary.completion_tokens
         );
-        println!("积分消耗：{:.2}", summary.credits);
+        crate::say!("积分消耗：{:.2}", summary.credits);
         if !summary.by_model.is_empty() {
-            println!();
+            crate::say!();
             for (model, count) in &summary.by_model {
-                println!("  {model:<28} {count}");
+                crate::say!("  {model:<28} {count}");
             }
         }
         return Ok(());
     }
     let records = log.recent(args.limit)?;
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&records)?);
+        crate::say!("{}", serde_json::to_string_pretty(&records)?);
         return Ok(());
     }
     if records.is_empty() {
-        println!("还没有调用记录。");
+        crate::say!("还没有调用记录。");
         return Ok(());
     }
-    println!(
+    crate::say!(
         "{:<16} {:<24} {:<7} {:>7} {:>7} {:<6} 来源",
-        "时间", "模型", "结果", "输入", "输出", "积分"
+        "时间",
+        "模型",
+        "结果",
+        "输入",
+        "输出",
+        "积分"
     );
     for record in &records {
         let when = chrono::DateTime::from_timestamp_millis(record.timestamp)
@@ -1030,7 +1076,7 @@ fn calls_cmd(store: &Store, args: CallsArgs) -> Result<()> {
         } else {
             format!("{} {}", record.source_ip, record.account_label)
         };
-        println!(
+        crate::say!(
             "{:<16} {:<24} {:<7} {:>7} {:>7} {:<6} {}",
             when,
             truncate(&record.model, 24),
@@ -1065,9 +1111,9 @@ fn export_cmd(store: &Store, args: ExportArgs) -> Result<()> {
     match args.out {
         Some(path) => {
             crate::store::write_private(&path, &text)?;
-            println!("已写出 {}", path.display());
+            crate::say!("已写出 {}", path.display());
         }
-        None => println!("{text}"),
+        None => crate::say!("{text}"),
     }
     Ok(())
 }
@@ -1110,20 +1156,20 @@ fn config_cmd(store: &Store, args: ConfigArgs) -> Result<()> {
     let mut changed = !args.set.is_empty();
     if args.rotate_key {
         let key = settings.rotate_api_key(store.dir())?;
-        println!("新的 API Key：{key}");
+        crate::say!("新的 API Key：{key}");
         changed = false;
     }
     if args.rotate_lan_key {
         let key = settings.rotate_lan_key(store.dir())?;
-        println!("新的 LAN Key：{key}");
+        crate::say!("新的 LAN Key：{key}");
         changed = false;
     }
     if changed {
         settings.save(store.dir())?;
-        println!("设置已保存。");
+        crate::say!("设置已保存。");
     }
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&settings)?);
+        crate::say!("{}", serde_json::to_string_pretty(&settings)?);
     }
     Ok(())
 }
@@ -1161,7 +1207,7 @@ pub async fn refresh_and_store(
         // 续期失败时只要原 token 还没过期就继续用它，免得一个连不上的续期接口
         // 把本来能用的会话弄停。
         Err(error) => {
-            eprintln!("token 刷新失败，继续使用现有 token：{error}");
+            crate::say_err!("token 刷新失败，继续使用现有 token：{error}");
             account.clone()
         }
     }
