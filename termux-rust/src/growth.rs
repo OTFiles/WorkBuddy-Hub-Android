@@ -223,6 +223,9 @@ pub async fn lottery_chances(account: &SavedAccount) -> i64 {
 
 /// 猫当前在哪。
 pub async fn travel_status(account: &SavedAccount) -> Result<TravelState> {
+    if account.region() != Region::Cn {
+        bail!("国际版账号没有成长中心");
+    }
     let data = growth(account, "GET", "/activity/growth/buddy/travel/status", None).await?;
     Ok(TravelState {
         state: data
@@ -247,6 +250,9 @@ pub async fn travel_status(account: &SavedAccount) -> Result<TravelState> {
 ///
 /// 失败会向上传递：把「请求挂了」报成「没有任务」会让用户以为账号没问题。
 pub async fn tasks(account: &SavedAccount) -> Result<Vec<GrowthTask>> {
+    if account.region() != Region::Cn {
+        return Ok(Vec::new());
+    }
     let data = growth(account, "GET", "/v2/activity/growth/tasks", None).await?;
     let Some(rows) = data.get("tasks").and_then(Value::as_array) else {
         return Ok(Vec::new());
@@ -410,6 +416,10 @@ async fn adopt(account: &SavedAccount, steps: &mut Vec<Step>) {
 /// 上游按北京时间零点重置当天的派发额度，所以同一天第二次调用会报「今日已
 /// 派出过」，而不是又放出去一次。
 pub async fn travel_once(account: &SavedAccount) -> Vec<Step> {
+    // 成长中心只在国内版有；国际版去打这些接口只会换回一个 404。
+    if account.region() != Region::Cn {
+        return vec![Step::no("国际版账号没有成长中心，跳过猫猫旅行")];
+    }
     let mut steps = Vec::new();
     let status = match travel_status(account).await {
         Ok(status) => status,
