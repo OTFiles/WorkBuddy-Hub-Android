@@ -40,6 +40,9 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
+ratatui = "0.29"
+crossterm = "0.28"
+unicode-width = "0.2"
 
 [dev-dependencies]
 # none: the test suite is dependency-free on purpose so `cargo test` works on

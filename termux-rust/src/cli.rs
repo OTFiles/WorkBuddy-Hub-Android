@@ -70,6 +70,10 @@ pub enum Command {
     Models(ModelsArgs),
     /// 查看调用记录
     Calls(CallsArgs),
+    /// 查看调用次数与当前积分（调用汇总 + 额度）
+    Stats(StatsArgs),
+    /// 打开终端界面（类似 App，但没有内置 Agent）
+    Tui,
     /// 清空调用记录
     ClearCalls,
     /// 导出当前账号凭证（给别的工具用）
@@ -204,6 +208,14 @@ pub struct ModelsArgs {
 
 #[derive(Args, Debug)]
 #[command(next_help_heading = "选项")]
+pub struct StatsArgs {
+    /// 输出原始 JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
 pub struct CallsArgs {
     /// 显示最近多少条（新的在前）
     #[arg(long, value_name = "条数", default_value_t = 20)]
@@ -318,6 +330,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Tasks(args) => tasks_cmd(&store, args).await,
         Command::Models(args) => models_cmd(&store, args).await,
         Command::Calls(args) => calls_cmd(&store, args),
+        Command::Stats(args) => stats_cmd(&store, args).await,
+        Command::Tui => crate::tui::run(store).await,
         Command::ClearCalls => {
             let log = crate::calllog::CallLog::open(store.dir(), 1);
             log.clear()?;
@@ -1086,6 +1100,84 @@ fn calls_cmd(store: &Store, args: CallsArgs) -> Result<()> {
             format!("{:.2}", record.credits),
             format!("{origin} {detail}").trim_end()
         );
+    }
+    Ok(())
+}
+
+/// 调用次数与当前积分放在一起看。
+///
+/// 这两件事平时分别来自 `calls --summary`（本地记录）和 `balance`（上游额度），
+/// 想知道「花了多少、还剩多少」时来回敲两条命令很别扭，所以合成一条。
+async fn stats_cmd(store: &Store, args: StatsArgs) -> Result<()> {
+    let settings = Settings::load(store.dir())?;
+    let log = crate::calllog::CallLog::open(store.dir(), settings.call_log_limit);
+    let summary = log.summary()?;
+    let account = store.active();
+    // 额度查不到不算致命：调用汇总是本地数据，照样能看。
+    let balance = match &account {
+        Some(account) => {
+            let fresh = if account.needs_refresh() {
+                refresh_and_store(store, account).await
+            } else {
+                account.clone()
+            };
+            upstream::fetch_credits(&fresh).await.ok()
+        }
+        None => None,
+    };
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "account": account.as_ref().map(|a| json!({
+                    "id": a.id,
+                    "label": a.label(),
+                    "region": a.region().name(),
+                })),
+                "calls": summary,
+                "credit_total": balance.as_ref().map(|b| b.total),
+                "credit_unlimited": balance.as_ref().map(|b| b.unlimited),
+                "credit_cycle_end": balance.as_ref().map(|b| b.cycle_end.clone()),
+            }))?
+        );
+        return Ok(());
+    }
+
+    match &account {
+        Some(account) => println!("账号：{}（{}）", account.label(), account.region().label()),
+        None => println!("账号：未登录"),
+    }
+    println!();
+    println!("调用次数 ：{}", summary.calls);
+    println!("  成功 / 失败 ：{} / {}", summary.succeeded, summary.failed);
+    println!(
+        "Tokens ：输入 {}，输出 {}，合计 {}",
+        summary.prompt_tokens,
+        summary.completion_tokens,
+        summary.prompt_tokens + summary.completion_tokens
+    );
+    println!("已消耗积分 ：{:.2}", summary.credits);
+    if !summary.by_model.is_empty() {
+        let mut models: Vec<(&String, &u64)> = summary.by_model.iter().collect();
+        models.sort_by(|a, b| b.1.cmp(a.1));
+        println!();
+        println!("按模型：");
+        for (model, count) in models.iter().take(8) {
+            println!("  {model:<26} {count} 次");
+        }
+    }
+    println!();
+    match balance {
+        Some(balance) if balance.unlimited => println!("剩余积分 ：不限"),
+        Some(balance) => {
+            println!("剩余积分 ：{:.2}", balance.total);
+            if !balance.cycle_end.is_empty() {
+                println!("周期结束 ：{}", balance.cycle_end);
+            }
+        }
+        None if account.is_none() => println!("剩余积分 ：未登录，无法查询"),
+        None => println!("剩余积分 ：查询失败（上面的原因见 `wbhub balance`）"),
     }
     Ok(())
 }

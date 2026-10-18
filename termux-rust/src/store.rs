@@ -188,6 +188,7 @@ impl Default for Selection {
 }
 
 /// Stores the accounts of each build and remembers which one is in use.
+#[derive(Clone)]
 pub struct Store {
     dir: PathBuf,
 }

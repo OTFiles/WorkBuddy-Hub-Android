@@ -189,13 +189,50 @@ wbhub accounts            # every account; * marks the active one
 wbhub use 8a433605        # switch by id, nickname, or prefix
 wbhub calls               # recent calls
 wbhub calls --summary     # totals: calls, tokens, credit
+wbhub stats               # call count and remaining credit in one go
 wbhub config --json
 wbhub config --set port=9000
 wbhub config --rotate-key
 wbhub export --out auth.json    # hand the credential to another tool
 ```
 
-### 6. Check-in and the growth centre
+### 6. Terminal UI
+
+```sh
+wbhub tui
+```
+
+A TUI shaped like the original app — **without the built-in agent**, which was a
+deliberate omission from the start (use any client you like in the terminal).
+
+```
+ WorkBuddy Hub  国内版 · 18923001005                              服务运行中 :8765
+  1 概览    2 模型    3 调用    4 成长    5 设置
+┌ 账号与额度 ─────────────────────────────────────────────────────────────┐
+│账号          18923001005                                                │
+│剩余积分      1135.20                    周期结束 2026-11-01             │
+│调用次数      42 次累计，今日 7 成功 / 0 失败                            │
+│Token 用量    输入 128,430，输出 31,902   已消耗 12.48                   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+| Page | Contents |
+|---|---|
+| 1 概览 | account, token expiry, **remaining credit**, **call count / tokens / credit spent**, base URL and key |
+| 2 模型 | model id, rate (free in green), context, reasoning/image badges |
+| 3 调用 | per-call time, model, outcome, tokens, credit, failure reason, plus totals |
+| 4 成长 | streak, makeup cards, redeemable tiers, lottery draws, the cat, night-owl progress |
+| 5 设置 | port, LAN toggle, call-log limit, refresh interval, key rotation |
+
+Keys: `Tab` next page · `1`–`5` jump · `r` refresh · `s` start/stop the server ·
+`←→` adjust · `Enter` toggle · `k` rotate keys · on the growth page `c` check-in,
+`d` daily, `t` travel, `n` night owl · `q` quit.
+
+The server is **started and stopped from inside the TUI** (`s`), so there is no
+second terminal to keep open; quitting stops it too. The layout adapts down to a
+50×20 phone terminal.
+
+### 7. Check-in and the growth centre
 
 ```sh
 wbhub checkin             # check-in only

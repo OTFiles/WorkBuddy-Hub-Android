@@ -14,6 +14,7 @@ pub mod http;
 pub mod login;
 pub mod settings;
 pub mod store;
+pub mod tui;
 pub mod upstream;
 pub mod wake;
 pub mod wire;
