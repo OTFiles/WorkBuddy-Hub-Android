@@ -70,6 +70,8 @@ pub enum Command {
     Models(ModelsArgs),
     /// 查看调用记录
     Calls(CallsArgs),
+    /// 逐层自检：DNS / TCP / TLS / 接口 / 凭证
+    Doctor(DoctorArgs),
     /// 查看调用次数与当前积分（调用汇总 + 额度）
     Stats(StatsArgs),
     /// 打开终端界面（类似 App，但没有内置 Agent）
@@ -208,6 +210,14 @@ pub struct ModelsArgs {
 
 #[derive(Args, Debug)]
 #[command(next_help_heading = "选项")]
+pub struct DoctorArgs {
+    /// 输出原始 JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "选项")]
 pub struct StatsArgs {
     /// 输出原始 JSON
     #[arg(long)]
@@ -330,6 +340,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Tasks(args) => tasks_cmd(&store, args).await,
         Command::Models(args) => models_cmd(&store, args).await,
         Command::Calls(args) => calls_cmd(&store, args),
+        Command::Doctor(args) => doctor_cmd(&store, args).await,
         Command::Stats(args) => stats_cmd(&store, args).await,
         Command::Tui => crate::tui::run(store).await,
         Command::ClearCalls => {
@@ -1100,6 +1111,27 @@ fn calls_cmd(store: &Store, args: CallsArgs) -> Result<()> {
             format!("{:.2}", record.credits),
             format!("{origin} {detail}").trim_end()
         );
+    }
+    Ok(())
+}
+
+/// 逐层自检。
+async fn doctor_cmd(store: &Store, args: DoctorArgs) -> Result<()> {
+    let settings = Settings::load(store.dir())?;
+    let report = crate::doctor::run(store, &settings).await?;
+    if args.json {
+        crate::say!(
+            "{}",
+            serde_json::to_string_pretty(&crate::doctor::to_json(&report))?
+        );
+    } else {
+        crate::say!("WorkBuddy 连通性自检（数据目录 {}）", store.dir().display());
+        crate::say!();
+        crate::doctor::print(&report);
+    }
+    if !report.healthy() {
+        // 自检没通过时用非零退出码，方便脚本/定时任务判断。
+        std::process::exit(1);
     }
     Ok(())
 }

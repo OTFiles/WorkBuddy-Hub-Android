@@ -9,6 +9,7 @@
 pub mod bridge;
 pub mod calllog;
 pub mod cli;
+pub mod doctor;
 pub mod growth;
 pub mod http;
 pub mod login;

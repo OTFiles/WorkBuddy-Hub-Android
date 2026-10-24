@@ -190,6 +190,7 @@ wbhub use 8a433605        # switch by id, nickname, or prefix
 wbhub calls               # recent calls
 wbhub calls --summary     # totals: calls, tokens, credit
 wbhub stats               # call count and remaining credit in one go
+wbhub doctor              # layer-by-layer: DNS / TCP / TLS / API / credential
 wbhub config --json
 wbhub config --set port=9000
 wbhub config --rotate-key
@@ -232,7 +233,17 @@ The server is **started and stopped from inside the TUI** (`s`), so there is no
 second terminal to keep open; quitting stops it too. The layout adapts down to a
 50×20 phone terminal.
 
-### 7. Check-in and the growth centre
+### 7. When something breaks, run the doctor first
+
+```sh
+wbhub doctor
+```
+
+It separates "the network is down" from "the account is dead" — the two look
+identical in an error message but need opposite fixes. It exits non-zero when a
+layer fails, so it drops straight into a script.
+
+### 8. Check-in and the growth centre
 
 ```sh
 wbhub checkin             # check-in only
@@ -322,6 +333,8 @@ single-account endpoint on a phone.
 | A client disconnecting mid-answer | the call vanished from the log | a `Drop` impl records it as `aborted` |
 | `wbhub models \| head` | panicked (Rust ignores SIGPIPE by default) | SIGPIPE restored, exits quietly |
 | Model list fetch failure | `/v1/models` stayed empty | one lazy retry when empty |
+| Transport errors | a bare `transport error` | the full cause chain plus a Chinese classification |
+| The first request after the phone wakes | 502 from a reused dead socket | 10s idle pool, TCP keepalive, one retry on connect-level failures |
 
 ---
 

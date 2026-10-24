@@ -184,6 +184,7 @@ wbhub use 8a433605        # 按 id / 昵称 / 前缀切换
 wbhub calls               # 最近的调用记录
 wbhub calls --summary     # 调用次数 / token / 积分汇总
 wbhub stats               # 调用次数 + 当前积分，一条命令看全
+wbhub doctor              # 逐层自检：DNS / TCP / TLS / 接口 / 凭证
 wbhub config --json       # 看设置
 wbhub config --set port=9000
 wbhub config --rotate-key
@@ -225,7 +226,30 @@ wbhub tui
 服务是**在 TUI 里启停的**：按 `s` 后它会在进程内起监听，用 `q` 退出时一并停掉，
 不需要另开一个终端跑 `serve`。界面自适应窄屏——手机竖屏 50×20 也放得下关键信息。
 
-### 7. 签到与成长中心
+### 7. 出问题时先跑自检
+
+```sh
+wbhub doctor
+```
+```
+WorkBuddy 连通性自检（数据目录 /data/data/com.termux/files/usr/var/lib/wbhub）
+
+  ✓ 账号         189****1005（国内版）· cn:8a433605
+  ✓ DNS 解析     copilot.tencent.com → 14.29.51.236, 113.108.215.151
+  ✓ TCP 连接     113.108.215.151:443 用时 15 ms
+  ✓ TLS 握手     证书校验通过
+  ✓ 配置接口      HTTP 200
+  ✓ 模型列表      19 个模型
+  ✓ 额度接口      剩余 1100.00
+  ! 本地端点      127.0.0.1:8765 已有服务在监听（要另起一个先换端口）
+
+  结论：这一侧没问题。
+```
+
+它逐层区分「网络不通」和「账号失效」——这两种在报错里长得一模一样，但要做的事完全
+不同。没通过时退出码非 0，可以直接放进脚本。
+
+### 8. 签到与成长中心
 
 ```sh
 wbhub checkin             # 只签到
@@ -311,6 +335,8 @@ calls.jsonl          调用记录
 | 客户端中途断开 | 记录丢失 | `Drop` 里补一条 `aborted` 记录 |
 | `wbhub models \| head` | panic（Rust 默认忽略 SIGPIPE） | 恢复 SIGPIPE 默认处置，安静退出 |
 | 模型列表拉取失败 | `/v1/models` 一直空 | 空的时候懒加载重试一次 |
+| 传输层报错 | 只有一句 `transport error` | 带上完整原因链和中文分类（连接失败 / 超时 / TLS / 请求体） |
+| 手机睡醒后第一次请求 | 复用死连接直接 502 | 空闲连接只留 10 秒 + TCP keepalive + 连接级失败重试一次 |
 
 ---
 
