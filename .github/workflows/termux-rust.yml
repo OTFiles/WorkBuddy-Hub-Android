@@ -126,10 +126,7 @@ jobs:
           mv "$RUNNER_TEMP/android-ndk-${NDK_VERSION}" "$NDK_ROOT"
           rm -f "$RUNNER_TEMP/ndk.zip"
 
-      - name: Build release binary
-        env:
-          # 把版本号烤进二进制，`wbhub --version` 和 /healthz 都会报它。
-          WBHUB_VERSION: ${{ needs.version.outputs.version }}
+      - name: Configure the Android target
         run: |
           set -euo pipefail
           TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
@@ -139,16 +136,25 @@ jobs:
             armv7-linux-androideabi)
               CC="$TOOLCHAIN/bin/armv7a-linux-androideabi${API_LEVEL}-clang" ;;
           esac
+          [ -x "$CC" ] || { echo "缺少编译器 $CC" >&2; exit 1; }
           AR="$TOOLCHAIN/bin/llvm-ar"
-          # 变量名有讲究，两种拼写都要给：
-          #   CC_<target>（连字符保留）—— cc-rs 给 ring 找编译器时用这个；
-          #   CARGO_TARGET_<TARGET>（大写加下划线）—— cargo 给链接器用这个。
-          # 只给全大写的那种，cc-rs 认不出来，会退回 `arm-linux-androideabi-clang`
-          # 然后报 ToolNotFound。
-          export "CC_${{ matrix.target }}=$CC"
-          export "AR_${{ matrix.target }}=$AR"
+          # 变量名有几种拼法，都要给，而且必须走 $GITHUB_ENV 而不是 export：
+          #   CC_<target>（连字符保留）—— cc-rs 给 ring 找编译器用它；
+          #   CARGO_TARGET_<TARGET>（大写加下划线）—— cargo 给链接器用它。
+          # bash 的 export 不接受带连字符的名字，所以只能写进环境文件。
           TARGET_UPPER=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
-          export "CARGO_TARGET_${TARGET_UPPER}_LINKER=$CC"
+          {
+            echo "CC_${{ matrix.target }}=$CC"
+            echo "AR_${{ matrix.target }}=$AR"
+            echo "CARGO_TARGET_${TARGET_UPPER}_LINKER=$CC"
+          } >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        env:
+          # 把版本号烤进二进制，`wbhub --version` 和 /healthz 都会报它。
+          WBHUB_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
           cargo build --release --target "${{ matrix.target }}" --locked
 
       - name: Verify and package
