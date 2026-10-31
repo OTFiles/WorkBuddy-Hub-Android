@@ -33,6 +33,9 @@ const REFRESH: Duration = Duration::from_secs(60);
 /// 事件循环的节拍：用来定时刷新和驱动界面重绘。
 const TICK: Duration = Duration::from_millis(250);
 
+/// 端口占用探测的间隔。
+const PROBE_EVERY: Duration = Duration::from_secs(3);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Overview,
@@ -117,6 +120,12 @@ pub struct App {
     growth: GrowthView,
     /// 正在进行的后台请求数，用来在标题栏转圈。
     inflight: usize,
+    /// 端口上现在是谁在服务。每几秒探一次，所以别的终端里起的 `serve` 也能看到。
+    occupant: crate::health::Occupant,
+    /// 端口占用探测的上次时间。
+    last_probe: Option<Instant>,
+    /// 正在编辑的数值行：行号 + 已输入的字符。
+    editing: Option<(usize, String)>,
     /// 最近几条一次性动作的结果，最新的在最后。
     log: VecDeque<(String, bool)>,
     settings_row: usize,
@@ -142,6 +151,9 @@ impl App {
             balance: None,
             growth: GrowthView::default(),
             inflight: 0,
+            occupant: crate::health::Occupant::Nothing,
+            last_probe: None,
+            editing: None,
             log: VecDeque::new(),
             settings_row: 0,
             last_refresh: None,
@@ -159,7 +171,8 @@ impl App {
         self.active = self.store.active();
     }
 
-    fn running(&self) -> bool {
+    /// 这个实例是不是本进程启动的。
+    fn owns_server(&self) -> bool {
         self.server.is_some()
     }
 
@@ -221,6 +234,16 @@ async fn event_loop(
         }
         if app.should_quit {
             break;
+        }
+
+        // 每 3 秒探一次端口：别的终端里起的 serve 也要能在界面上看见。
+        if app
+            .last_probe
+            .map(|at| at.elapsed() >= PROBE_EVERY)
+            .unwrap_or(true)
+        {
+            app.last_probe = Some(Instant::now());
+            app.occupant = crate::health::probe(app.settings.port).await;
         }
 
         if event::poll(TICK)? {
@@ -374,6 +397,12 @@ async fn read_growth(account: &SavedAccount) -> GrowthView {
 }
 
 async fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSender<Msg>) {
+    // 编辑态优先吃掉所有按键，否则打字会触发翻页、启停之类的事情。
+    if app.editing.is_some() {
+        handle_edit_key(app, key);
+        return;
+    }
+
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
             app.should_quit = true;
@@ -383,11 +412,11 @@ async fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSender<Msg
             app.should_quit = true;
             return;
         }
-        KeyCode::Tab => {
+        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
             app.next_page();
             return;
         }
-        KeyCode::BackTab => {
+        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
             app.previous_page();
             return;
         }
@@ -409,6 +438,72 @@ async fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSender<Msg
             KeyCode::Char('s') => toggle_server(app, tx).await,
             _ => {}
         },
+    }
+}
+
+/// 数值行的编辑：只收数字，Enter 提交，Esc 放弃。
+fn handle_edit_key(app: &mut App, key: KeyEvent) {
+    let Some((row, ref mut buffer)) = app.editing else {
+        return;
+    };
+    match key.code {
+        KeyCode::Char(ch) if ch.is_ascii_digit() => {
+            // 端口最多 5 位，其余 4 位，够用且不会输入到失控。
+            if buffer.len() < 5 {
+                buffer.push(ch);
+            }
+        }
+        KeyCode::Backspace => {
+            buffer.pop();
+        }
+        KeyCode::Esc => {
+            app.editing = None;
+        }
+        KeyCode::Enter => {
+            let text = buffer.clone();
+            app.editing = None;
+            commit_number(app, row, &text);
+        }
+        _ => {}
+    }
+}
+
+/// 把编辑框里的数落进设置。
+fn commit_number(app: &mut App, row: usize, text: &str) {
+    let Ok(value) = text.parse::<i64>() else {
+        app.note("没有输入数字，已取消", false);
+        return;
+    };
+    let (field, clamped, unit) = match row {
+        0 => {
+            let clamped = value.clamp(1024, 65535);
+            app.settings.port = clamped as u16;
+            ("端口", clamped, "")
+        }
+        2 => {
+            let clamped = value.clamp(100, 20000);
+            app.settings.call_log_limit = clamped as usize;
+            ("调用记录上限", clamped, "")
+        }
+        3 => {
+            let clamped = value.clamp(1, 240);
+            app.settings.refresh_minutes = clamped as u64;
+            ("模型刷新间隔", clamped, " 分钟")
+        }
+        _ => return,
+    };
+    persist(app);
+    if clamped != value {
+        app.note(
+            format!("{field}已改为 {clamped}{unit}（超出范围，已夹到边界）"),
+            true,
+        );
+    } else {
+        app.note(format!("{field}已改为 {clamped}{unit}"), true);
+    }
+    // 端口变了，端口占用要重新判断。
+    if row == 0 {
+        app.last_probe = None;
     }
 }
 
@@ -474,56 +569,49 @@ async fn handle_growth_key(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSen
 }
 
 async fn handle_settings_key(app: &mut App, key: KeyEvent) {
-    const ROWS: usize = 6;
+    const ROWS: usize = 7;
     match key.code {
         KeyCode::Up => app.settings_row = app.settings_row.saturating_sub(1),
         KeyCode::Down => app.settings_row = (app.settings_row + 1).min(ROWS - 1),
         KeyCode::Enter => match app.settings_row {
+            // 数值行进入编辑态，回车再确认。
+            0 | 2 | 3 => {
+                let current = match app.settings_row {
+                    0 => app.settings.port.to_string(),
+                    2 => app.settings.call_log_limit.to_string(),
+                    _ => app.settings.refresh_minutes.to_string(),
+                };
+                app.editing = Some((app.settings_row, current));
+            }
             1 => {
                 app.settings.lan_enabled = !app.settings.lan_enabled;
                 persist(app);
+                app.note(
+                    if app.settings.lan_enabled {
+                        "局域网已开启（重启服务生效）"
+                    } else {
+                        "局域网已关闭（重启服务生效）"
+                    },
+                    true,
+                );
             }
-            4 => {
+            6 => {
                 app.settings.verbose = !app.settings.verbose;
                 persist(app);
             }
             _ => {}
         },
         KeyCode::Char('k') => match app.settings_row {
-            3 => match app.settings.rotate_api_key(app.store.dir()) {
+            4 => match app.settings.rotate_api_key(app.store.dir()) {
                 Ok(key) => app.note(format!("新的 API Key：{key}"), true),
                 Err(error) => app.note(format!("换密钥失败：{error}"), false),
             },
-            4 => match app.settings.rotate_lan_key(app.store.dir()) {
+            5 => match app.settings.rotate_lan_key(app.store.dir()) {
                 Ok(key) => app.note(format!("新的 LAN Key：{key}"), true),
                 Err(error) => app.note(format!("换密钥失败：{error}"), false),
             },
             _ => app.note("这一行没有可轮换的密钥", false),
         },
-        KeyCode::Left | KeyCode::Char('-') => adjust_setting(app, -1),
-        KeyCode::Right | KeyCode::Char('+') => adjust_setting(app, 1),
-        _ => {}
-    }
-}
-
-/// 用左右方向键调数值，省掉一个文本输入模式。
-fn adjust_setting(app: &mut App, direction: i64) {
-    match app.settings_row {
-        0 => {
-            let next = (app.settings.port as i64 + direction * 10).clamp(1024, 65535);
-            app.settings.port = next as u16;
-            persist(app);
-        }
-        2 => {
-            let next = (app.settings.call_log_limit as i64 + direction * 100).clamp(100, 20000);
-            app.settings.call_log_limit = next as usize;
-            persist(app);
-        }
-        5 => {
-            let next = (app.settings.refresh_minutes as i64 + direction * 5).clamp(1, 240);
-            app.settings.refresh_minutes = next as u64;
-            persist(app);
-        }
         _ => {}
     }
 }
@@ -540,6 +628,18 @@ async fn toggle_server(app: &mut App, tx: &mpsc::UnboundedSender<Msg>) {
         task.abort();
         let _ = tx.send(Msg::Server(None));
         app.note(format!("已停止（原端口 {port}）"), true);
+        return;
+    }
+    // 端口上已经有 wbhub 在跑了（别的终端），再起一个只会撞端口；说清楚比让
+    // bind 报一句 "Address already in use" 有用。
+    if let crate::health::Occupant::Wbhub { version } = &app.occupant {
+        app.note(
+            format!(
+                "端口 {} 上已经有 wbhub {version} 在服务，不用再起一个",
+                app.settings.port
+            ),
+            true,
+        );
         return;
     }
     let mut settings = app.settings.clone();

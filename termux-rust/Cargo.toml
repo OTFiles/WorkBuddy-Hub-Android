@@ -1,6 +1,6 @@
 [package]
 name = "wbhub"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 description = "WorkBuddy Hub for Termux — an OpenAI-compatible bridge to WorkBuddy/CodeBuddy accounts, rewritten in Rust"
 license = "MIT"

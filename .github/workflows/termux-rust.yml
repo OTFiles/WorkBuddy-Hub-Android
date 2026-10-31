@@ -1,20 +1,19 @@
 name: Build Termux binaries
 
-# Produces android/arm64 and android/arm binaries of the Rust rewrite.
+# 产物按「上游 App 的版本号 + 该版本的构建序号」发版，例如 v0.3.0-01。
 #
-# Both are built because the port is meant to run on any Android device; the
-# 64-bit one is what a current phone needs, and the 32-bit one is kept as an
-# artefact for older hardware rather than dropped silently.
+# 版本号只有一处来源：app/build.gradle.kts 里的 versionName。上游不升版本就不升
+# 主版本，只把序号往后推，这样「对应哪个 App 版本」一眼能看出来。另外保留一个
+# 滚动 tag（termux-latest），因为 README 里的下载链接要稳定。
 #
-# The NDK is used rather than a plain `cargo build` because GitHub's runners
-# cannot run a cross linker for Android without it. On a real Termux device the
-# same source builds natively with no NDK at all — see the README.
+# 两个架构都编：64 位是现在手机要用的，32 位留给老设备，不悄悄去掉。
 
 on:
   push:
     branches: [main, termux-rust]
     paths:
       - 'termux-rust/**'
+      - 'app/build.gradle.kts'
       - '.github/workflows/termux-rust.yml'
   pull_request:
     paths:
@@ -24,13 +23,41 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # The APK build targets an older API level for compatibility; the same floor
-  # is used here so a binary that runs in CI also runs on the same devices the
-  # Android app supported.
   NDK_VERSION: r27c
   API_LEVEL: 24
 
 jobs:
+  version:
+    name: Work out the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      base: ${{ steps.version.outputs.base }}
+      build: ${{ steps.version.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        name: Derive version from the Android build file
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # 单一来源：App 的 versionName。改版本号只改那一个文件。
+          BASE=$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+          if [ -z "$BASE" ]; then
+            echo "app/build.gradle.kts 里找不到 versionName" >&2
+            exit 1
+          fi
+          # 同一主版本下已经发过几次，序号就往后加一。
+          EXISTING=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName --jq "[.[] | select(.tagName | startswith(\"v${BASE}-\"))] | length")
+          BUILD=$(printf "%02d" $(( EXISTING + 1 )))
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "version=${BASE}-${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "版本：${BASE}-${BUILD}（该主版本下已有 ${EXISTING} 个发布）"
+
   test:
     name: Test (host)
     runs-on: ubuntu-latest
@@ -41,6 +68,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -56,8 +85,8 @@ jobs:
         run: cargo test --all-targets
 
   build:
-    name: Build (${{ matrix.target }})
-    needs: test
+    name: Build (${{ matrix.label }})
+    needs: [version, test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -65,10 +94,8 @@ jobs:
         include:
           - target: aarch64-linux-android
             label: arm64
-            ndk_triple: aarch64-linux-android
           - target: armv7-linux-androideabi
             label: arm
-            ndk_triple: armv7a-linux-androideabi
     defaults:
       run:
         working-directory: termux-rust
@@ -99,41 +126,20 @@ jobs:
           mv "$RUNNER_TEMP/android-ndk-${NDK_VERSION}" "$NDK_ROOT"
           rm -f "$RUNNER_TEMP/ndk.zip"
 
-      - name: Configure the Android target
+      - name: Build release binary
+        env:
+          # 把版本号烤进二进制，`wbhub --version` 和 /healthz 都会报它。
+          WBHUB_VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
           TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
-          echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
-          CC="$TOOLCHAIN/bin/${{ matrix.ndk_triple }}${API_LEVEL}-clang"
-          if [ ! -x "$CC" ]; then
-            echo "missing compiler: $CC" >&2
-            ls "$TOOLCHAIN/bin" | grep -i "${{ matrix.ndk_triple }}" | head >&2
-            exit 1
-          fi
-          echo "CC_${{ matrix.target }}=$CC" >> "$GITHUB_ENV"
-          echo "AR_${{ matrix.target }}=$TOOLCHAIN/bin/llvm-ar" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')_LINKER=$CC" >> "$GITHUB_ENV"
-
-      - name: Build release binary
-        env:
-          CC: ${{ env.CC_aarch64-linux-android }}
-        run: |
-          set -euo pipefail
-          # Pick the compiler for this matrix entry; a single env var cannot be
-          # named dynamically in the workflow syntax, so it is resolved here.
           case "${{ matrix.target }}" in
             aarch64-linux-android)
-              export CC="$TOOLCHAIN/bin/aarch64-linux-android${API_LEVEL}-clang"
-              export AR="$TOOLCHAIN/bin/llvm-ar"
-              ;;
+              CC="$TOOLCHAIN/bin/aarch64-linux-android${API_LEVEL}-clang" ;;
             armv7-linux-androideabi)
-              export CC="$TOOLCHAIN/bin/armv7a-linux-androideabi${API_LEVEL}-clang"
-              export AR="$TOOLCHAIN/bin/llvm-ar"
-              ;;
+              CC="$TOOLCHAIN/bin/armv7a-linux-androideabi${API_LEVEL}-clang" ;;
           esac
-          export CARGO_TARGET_DIR=target
-          # The cc crate (pulled in by ring/rustls) reads the upper-case form of
-          # the target as its env var name.
+          AR="$TOOLCHAIN/bin/llvm-ar"
           TARGET_UPPER=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
           export "CC_${TARGET_UPPER}=$CC"
           export "AR_${TARGET_UPPER}=$AR"
@@ -146,12 +152,18 @@ jobs:
           BIN="target/${{ matrix.target }}/release/wbhub"
           [ -x "$BIN" ] || { echo "binary not produced at $BIN" >&2; exit 1; }
           file "$BIN" || true
-          "$TOOLCHAIN/bin/llvm-strip" "$BIN" 2>/dev/null || true
           ls -lh "$BIN"
+          # 版本号必须真的进了二进制，否则发布的包名和内容对不上。
+          # 注意不能直接执行它：这是 Android 的 ELF，在 ubuntu runner 上跑不起来，
+          # 只能从字节里找。
+          VERSION="${{ needs.version.outputs.version }}"
+          if ! grep -aq -- "$VERSION" "$BIN"; then
+            echo "二进制里找不到版本号 $VERSION" >&2
+            exit 1
+          fi
+          echo "已确认二进制内含版本 $VERSION"
           mkdir -p dist
           cp "$BIN" "dist/wbhub-${{ matrix.label }}"
-          # A checksum so a download can be verified on the phone, where a
-          # truncated transfer is otherwise indistinguishable from a crash.
           ( cd dist && sha256sum "wbhub-${{ matrix.label }}" > "wbhub-${{ matrix.label }}.sha256" )
           cat dist/*.sha256
 
@@ -165,44 +177,65 @@ jobs:
           retention-days: 30
 
   release:
-    name: Attach to a rolling release
-    needs: build
+    name: Publish ${{ needs.version.outputs.version }}
+    needs: [version, build]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Show what will be published
+      - name: List what will be published
         run: ls -lR artifacts
 
-      # A single rolling tag keeps the README's download link stable, which
-      # matters because the target audience is a phone with no easy way to match
-      # a version number to a file name.
-      - uses: softprops/action-gh-release@v2
+      - name: Publish the versioned release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 形如 v0.3.0-01：主版本跟 App 一致，序号是同一主版本下的第几次构建。
+          tag_name: v${{ needs.version.outputs.version }}
+          name: ${{ needs.version.outputs.version }}（对应 App ${{ needs.version.outputs.base }}）
+          body: |
+            对应 App 版本 **${{ needs.version.outputs.base }}**（`app/build.gradle.kts` 的
+            versionName），这是该版本下的第 **${{ needs.version.outputs.build }}** 次 Termux 构建。
+
+            * `wbhub-arm64` —— 64 位 Android（`uname -m` 显示 `aarch64`）。**现在的手机用这个。**
+            * `wbhub-arm` —— 32 位 Android（`armv7l`），老设备用。
+
+            ```sh
+            pkg install -y curl
+            curl -L -O https://github.com/${{ github.repository }}/releases/download/v${{ needs.version.outputs.version }}/wbhub-arm64
+            curl -L -O https://github.com/${{ github.repository }}/releases/download/v${{ needs.version.outputs.version }}/wbhub-arm64.sha256
+            sha256sum -c wbhub-arm64.sha256   # .sha256 里的文件名就是 wbhub-arm64
+            chmod +x wbhub-arm64 && mv wbhub-arm64 wbhub
+            ./wbhub --version                 # 应显示 ${{ needs.version.outputs.version }}
+            ./wbhub doctor                    # 逐层自检
+            ```
+
+            构建自 `${{ github.sha }}`。
+          files: |
+            artifacts/wbhub-arm64
+            artifacts/wbhub-arm64.sha256
+            artifacts/wbhub-arm
+            artifacts/wbhub-arm.sha256
+          fail_on_unmatched_files: true
+
+      # README 里的下载地址指向 termux-latest，所以还要维护一个滚动 tag，
+      # 否则每发一版文档里的链接就失效一次。
+      - name: Move the rolling termux-latest tag
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: termux-latest
           name: Termux builds (rolling)
           body: |
-            Rolling build of the Rust port, for Termux on Android.
+            滚动入口，内容等于最新的版本化发布：**v${{ needs.version.outputs.version }}**。
 
-            * `wbhub-arm64` — 64-bit Android (`uname -m` reports `aarch64`). **Use this one on any current phone.**
-            * `wbhub-arm` — 32-bit Android (`armv7l`), for older devices.
-
-            ```sh
-            pkg install -y curl
-            curl -L -O https://github.com/${{ github.repository }}/releases/download/termux-latest/wbhub-arm64
-            curl -L -O https://github.com/${{ github.repository }}/releases/download/termux-latest/wbhub-arm64.sha256
-            sha256sum -c wbhub-arm64.sha256   # the checksum file names the asset
-            chmod +x wbhub-arm64 && mv wbhub-arm64 wbhub
-            ./wbhub --help
-            ```
-
-            Built from `${{ github.sha }}`.
+            想固定版本请直接下载 `v${{ needs.version.outputs.version }}`，不要用这个 tag。
           files: |
             artifacts/wbhub-arm64
             artifacts/wbhub-arm64.sha256

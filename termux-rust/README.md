@@ -8,7 +8,8 @@ Studio、不需要 APK、不需要电脑。
 
 ```sh
 pkg install -y curl
-curl -L -o wbhub-arm64 https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/download/termux-latest/wbhub-arm64
+# 版本号形如 v0.3.0-01：前缀跟上游 App 的 versionName 一致，后缀是同一版本下的第几次构建
+curl -L -O https://github.com/OTFiles/WorkBuddy-Hub-Android/releases/latest/download/wbhub-arm64
 chmod +x wbhub-arm64
 mv wbhub-arm64 wbhub        # 可选：改短名字，后面用 ./wbhub
 ./wbhub login               # 浏览器登录一次
@@ -176,7 +177,8 @@ wbhub serve --lan
 
 ```sh
 wbhub status              # 当前账号、端口、key
-wbhub balance             # 剩余额度
+wbhub balance             # 剩余额度（含「几个包、最近到期」）
+wbhub balance --detail    # 逐个包列出来，用于核对总额
 wbhub balance --json      # 给脚本用
 wbhub models --ids        # 只列模型名
 wbhub accounts            # 所有账号（* 标记当前使用的）
@@ -219,9 +221,22 @@ wbhub tui
 | 4 成长 | 连登、补签卡、可兑换档位、抽奖次数、猫猫位置、夜猫子进度 |
 | 5 设置 | 端口、局域网开关、调用记录上限、刷新间隔，以及换密钥 |
 
-按键：`Tab` 切页 · `1`–`5` 直接跳 · `r` 刷新 · `s` 启停服务 · `←→` 调数值 ·
-`Enter` 开关 · `k` 换密钥 · 成长页里 `c` 签到 / `d` 日常 / `t` 旅行 / `n` 夜猫子 ·
-`q` 退出。
+按键：`←→` / `Tab` 切页 · `1`–`5` 直接跳 · `r` 刷新 · `s` 启停服务 ·
+`↑↓` 在设置页选行 · `Enter` 编辑数值（**再按一次回车确认**，`Esc` 取消）或切换开关 ·
+`k` 换密钥 · 成长页里 `c` 签到 / `d` 日常 / `t` 旅行 / `n` 夜猫子 · `q` 退出。
+
+**端口上是谁在服务，界面会直接告诉你**，分四种情况：
+
+| 显示 | 含义 |
+|---|---|
+| `服务运行中 :8765` | 本进程启动的 |
+| `外部实例 0.3.0-01 :8765` | 别的终端里跑的 `wbhub serve`，本界面只做查看 |
+| `端口 8765 被占用` | 有东西在听，但不是 wbhub（比如安卓版、旧版、别的程序） |
+| `服务未启动` | 没人监听 |
+
+判断方式是每 3 秒请求一次 `GET /healthz`，看返回里的 `service: "wbhub"` 和版本号——
+只看端口有没有人监听是不够的，同端口可能被别的程序占着。这时按 `s` 会提示已有实例，
+而不是撞端口报一句 `Address already in use`。
 
 服务是**在 TUI 里启停的**：按 `s` 后它会在进程内起监听，用 `q` 退出时一并停掉，
 不需要另开一个终端跑 `serve`。界面自适应窄屏——手机竖屏 50×20 也放得下关键信息。
@@ -249,7 +264,28 @@ WorkBuddy 连通性自检（数据目录 /data/data/com.termux/files/usr/var/lib
 它逐层区分「网络不通」和「账号失效」——这两种在报错里长得一模一样，但要做的事完全
 不同。没通过时退出码非 0，可以直接放进脚本。
 
-### 8. 签到与成长中心
+### 8. 积分是怎么算的
+
+`剩余积分` 是上游返回的**所有有效包之和**。签到每成功一次就多一个「赠送包」，所以包
+会越来越多；过期包不会从响应里消失，只是 `Status = 3`，不计入总额。
+
+```sh
+$ wbhub balance
+剩余：1300.00
+构成：9 个有效包（另有 2 个已过期，不计入）
+最近到期：2026-11-07 14:02:08
+
+$ wbhub balance --detail
+  CodeBuddy个人版国内运营裂变包   余 100.00  共 100.00   2026-11-07 14:02:08
+  ...
+  CodeBuddy个人版国内运营裂变包   余 0.00    共 3000.00  2027-04-19 12:12:07  已过期
+```
+
+所以「和 App 里显示的不一致」时，先用 `--detail` 核对：多半是 App 显示的是某一个包
+（或某个周期）而不是全部之和，也可能是两次查询之间恰好签到 / 消耗了。`--json` 里的
+每个包都带 `expired` 标记，脚本可以直接过滤。
+
+### 9. 签到与成长中心
 
 ```sh
 wbhub checkin             # 只签到

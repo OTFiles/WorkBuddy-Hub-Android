@@ -256,6 +256,7 @@ async fn handle(
 
     let response = match (method.clone(), path.as_str()) {
         (Method::GET, "/v1/models") => models(&bridge).await,
+        (Method::GET, "/v1/status") => status(&bridge).await,
         (Method::POST, "/v1/chat/completions") => {
             chat(bridge.clone(), request, peer, from_loopback).await
         }
@@ -272,13 +273,35 @@ async fn handle(
     Ok(response)
 }
 
+/// 存活探测。
+///
+/// 故意不要求鉴权，因为探测方可能不是这个实例的配置持有者（TUI 要能认出别的终端
+/// 里跑的那份 wbhub）。代价是它对外可见，所以只报「我是谁、活了多久」——账号、
+/// 端口、用量都不在这里，开了 `--lan` 也不会把昵称泄露给同网段。
 async fn health(bridge: &Arc<Bridge>) -> Response<Body> {
-    let account = bridge.store.active();
-    let region = account
-        .as_ref()
-        .map(|a| a.region().name())
-        .unwrap_or("none");
-    let (requests, remote, uptime) = {
+    let uptime = {
+        let status = bridge.status.lock().await;
+        status
+            .started_at
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0)
+    };
+    json_response(
+        StatusCode::OK,
+        json!({
+            "ok": true,
+            "service": "wbhub",
+            "version": crate::build_version(),
+            "uptime_seconds": uptime,
+        }),
+    )
+}
+
+/// 需要鉴权的详细状态，给 TUI 和 `wbhub status` 用。
+async fn status(bridge: &Arc<Bridge>) -> Response<Body> {
+    let account = bridge.credential().await;
+    let settings = bridge.settings.read().await.clone();
+    let (requests, remote, uptime, last_request, last_error) = {
         let status = bridge.status.lock().await;
         (
             status.requests,
@@ -287,18 +310,26 @@ async fn health(bridge: &Arc<Bridge>) -> Response<Body> {
                 .started_at
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(0),
+            status.last_request.clone(),
+            status.last_error.clone(),
         )
     };
     json_response(
         StatusCode::OK,
         json!({
-            "ok": true,
-            "region": region,
+            "service": "wbhub",
+            "version": crate::build_version(),
+            "region": account.as_ref().map(|a| a.region().name()).unwrap_or("none"),
             "account": account.as_ref().map(|a| a.label()),
+            "account_id": account.as_ref().map(|a| a.id.clone()),
             "models": bridge.model_ids().await.len(),
             "requests": requests,
             "remote_requests": remote,
             "uptime_seconds": uptime,
+            "port": settings.port,
+            "lan_enabled": settings.lan_enabled,
+            "last_request": last_request,
+            "last_error": last_error,
         }),
     )
 }

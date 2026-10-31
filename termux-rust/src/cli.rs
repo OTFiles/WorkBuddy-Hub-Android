@@ -22,7 +22,7 @@ use crate::wire::{self, Region};
 #[derive(Parser, Debug)]
 #[command(
     name = "wbhub",
-    version,
+    version = crate::build_version(),
     about = "WorkBuddy Hub for Termux —— 把 WorkBuddy / CodeBuddy 账号变成 OpenAI 兼容端点",
     long_about = "在你的手机上跑一个本地 OpenAI 兼容端点，用你自己的 WorkBuddy（国内版）\
                   或 WorkBuddy 国际版账号作为上游。\n\n\
@@ -152,6 +152,9 @@ pub struct BalanceArgs {
     /// 输出原始 JSON
     #[arg(long)]
     pub json: bool,
+    /// 逐个列出包（含已过期的），用来核对总额怎么算出来的
+    #[arg(long)]
+    pub detail: bool,
 }
 
 #[derive(Args, Debug)]
@@ -331,7 +334,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Use(args) => use_cmd(&store, args),
         Command::Logout(args) => logout_cmd(&store, args),
         Command::Serve(args) => serve_cmd(store, args).await,
-        Command::Status => status_cmd(&store),
+        Command::Status => status_cmd(&store).await,
         Command::Balance(args) => balance_cmd(&store, args).await,
         Command::Checkin(args) => checkin_cmd(&store, args).await,
         Command::Daily(args) => daily_cmd(&store, args).await,
@@ -724,7 +727,7 @@ fn local_ipv4_addresses() -> Vec<String> {
     addresses
 }
 
-fn status_cmd(store: &Store) -> Result<()> {
+async fn status_cmd(store: &Store) -> Result<()> {
     let settings = Settings::load(store.dir())?;
     crate::say!("数据目录 : {}", store.dir().display());
     match store.active() {
@@ -758,6 +761,25 @@ fn status_cmd(store: &Store) -> Result<()> {
     if settings.lan_enabled {
         crate::say!("LAN Key  : {}", settings.lan_key);
     }
+
+    // 端口上到底是谁在服务：光看「有人在听」不够，还要确认那是 wbhub。
+    let occupant = crate::health::probe(settings.port).await;
+    crate::say!(
+        "服务状态 : {}",
+        crate::health::describe(&occupant, settings.port)
+    );
+    match &occupant {
+        crate::health::Occupant::Wbhub { version } if version != crate::build_version() => {
+            crate::say!(
+                "           注意：端口上的实例是 {version}，本机二进制是 {}",
+                crate::build_version()
+            );
+        }
+        crate::health::Occupant::Nothing => {
+            crate::say!("           需要的话运行 `wbhub serve` 或 `wbhub tui` 里按 s 启动");
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -775,6 +797,7 @@ async fn balance_cmd(store: &Store, args: BalanceArgs) -> Result<()> {
                 "size": a.size,
                 "cycle_end": a.cycle_end,
                 "unlimited": a.unlimited,
+                "expired": a.expired,
             })).collect::<Vec<_>>(),
         });
         crate::say!("{}", serde_json::to_string_pretty(&payload)?);
@@ -786,20 +809,33 @@ async fn balance_cmd(store: &Store, args: BalanceArgs) -> Result<()> {
         return Ok(());
     }
     crate::say!("剩余：{:.2}", balance.total);
+    // 把「这个数是怎么来的」说出来：签到一次就多一个赠送包，包会越来越多、过期的
+    // 还留着，只给一个总数的话没人能核对。
+    let active = balance
+        .accounts
+        .iter()
+        .filter(|a| !a.expired && a.remain > 0.0)
+        .count();
+    let expired = balance.accounts.iter().filter(|a| a.expired).count();
+    crate::say!("构成：{active} 个有效包（另有 {expired} 个已过期，不计入）");
     if !balance.cycle_end.is_empty() {
-        crate::say!("周期结束：{}", balance.cycle_end);
+        crate::say!("最近到期：{}", balance.cycle_end);
     }
-    if balance.accounts.len() > 1 {
+    if args.detail {
         crate::say!();
         for account in &balance.accounts {
             crate::say!(
-                "  {:<28} 余 {:<10.2} 共 {:<10.2} {}",
+                "  {:<30} 余 {:<9.2} 共 {:<9.2} {:<20} {}",
                 account.name,
                 account.remain,
                 account.size,
-                account.cycle_end
+                account.cycle_end,
+                if account.expired { "已过期" } else { "" }
             );
         }
+    } else if active > 1 {
+        crate::say!();
+        crate::say!("（`wbhub balance --detail` 可以逐个核对）");
     }
     Ok(())
 }

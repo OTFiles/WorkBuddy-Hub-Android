@@ -225,9 +225,25 @@ deliberate omission from the start (use any client you like in the terminal).
 | 4 成长 | streak, makeup cards, redeemable tiers, lottery draws, the cat, night-owl progress |
 | 5 设置 | port, LAN toggle, call-log limit, refresh interval, key rotation |
 
-Keys: `Tab` next page · `1`–`5` jump · `r` refresh · `s` start/stop the server ·
-`←→` adjust · `Enter` toggle · `k` rotate keys · on the growth page `c` check-in,
-`d` daily, `t` travel, `n` night owl · `q` quit.
+Keys: `←→` / `Tab` page · `1`–`5` jump · `r` refresh · `s` start/stop ·
+`↑↓` select a settings row · `Enter` edit a number (**Enter again to confirm**,
+`Esc` to cancel) or toggle a switch · `k` rotate keys · on the growth page
+`c` check-in, `d` daily, `t` travel, `n` night owl · `q` quit.
+
+**The header tells you who owns the port**, because "something is listening" is
+not the same as "wbhub is serving":
+
+| Shown | Meaning |
+|---|---|
+| `服务运行中 :8765` | started by this process |
+| `外部实例 0.3.0-01 :8765` | a `wbhub serve` in another terminal; this window only observes |
+| `端口 8765 被占用` | something is listening, but it is not wbhub |
+| `服务未启动` | nothing listening |
+
+It polls `GET /healthz` every 3s and checks the `service: "wbhub"` field and the
+version — a bare port check cannot tell an Android build or an unrelated program
+apart. Pressing `s` in that state says so instead of failing with
+`Address already in use`.
 
 The server is **started and stopped from inside the TUI** (`s`), so there is no
 second terminal to keep open; quitting stops it too. The layout adapts down to a

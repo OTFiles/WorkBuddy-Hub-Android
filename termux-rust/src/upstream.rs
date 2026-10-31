@@ -20,6 +20,8 @@ pub struct CreditAccount {
     pub size: f64,
     pub cycle_end: String,
     pub unlimited: bool,
+    /// 上游标了 `Status = 3`（已过期）。过期包不计入总额，但保留下来好解释明细。
+    pub expired: bool,
 }
 
 /// Aggregated balance.
@@ -159,12 +161,17 @@ async fn fetch_personal_credits(account: &SavedAccount) -> Result<Balance> {
             capacity_remain
         }
         .max(0.0);
-        total += remain;
+        // `Status = 3` 是上游的「已过期」。签到攒出来的赠送包过期后仍然留在响应
+        // 里，把它们算进余额是最容易出错的地方。
+        let expired = row.get("Status").and_then(Value::as_i64) == Some(3);
+        if !expired {
+            total += remain;
+        }
         let name = row
             .get("PackageName")
             .and_then(Value::as_str)
             .filter(|n| !n.is_empty())
-            .unwrap_or("(unnamed)")
+            .unwrap_or("(无名)")
             .to_string();
         result.push(CreditAccount {
             name,
@@ -180,11 +187,16 @@ async fn fetch_personal_credits(account: &SavedAccount) -> Result<Balance> {
                 .unwrap_or("")
                 .to_string(),
             unlimited: false,
+            expired,
         });
     }
+    // 「周期结束」取**最近**一个还没结束的周期，而不是第一行的。行的顺序由上游
+    // 决定，之前正好取到过一个已过期包（2027 年那个），看起来就像额度快到期了。
     let cycle_end = result
-        .first()
+        .iter()
+        .filter(|a| !a.expired && a.remain > 0.0 && !a.cycle_end.is_empty())
         .map(|a| a.cycle_end.clone())
+        .min()
         .unwrap_or_default();
     Ok(Balance {
         total,
@@ -263,6 +275,7 @@ async fn fetch_enterprise_credits(account: &SavedAccount) -> Result<Balance> {
                 size: 0.0,
                 cycle_end: reset,
                 unlimited: true,
+                expired: false,
             }],
             cycle_end: String::new(),
             unlimited: true,
@@ -278,6 +291,7 @@ async fn fetch_enterprise_credits(account: &SavedAccount) -> Result<Balance> {
             size: resolved_limit,
             cycle_end: reset.clone(),
             unlimited: false,
+            expired: false,
         }],
         cycle_end: reset,
         unlimited: false,

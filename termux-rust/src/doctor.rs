@@ -341,6 +341,7 @@ async fn resolve(host: &str) -> Result<Vec<String>> {
 
 /// 打印报告。
 pub fn print(report: &Report) {
+    crate::say!("  版本         wbhub {}", crate::build_version());
     for step in &report.steps {
         crate::say!(
             "  {} {:<10} {}",

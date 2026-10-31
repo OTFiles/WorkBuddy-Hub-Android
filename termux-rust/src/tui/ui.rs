@@ -175,18 +175,30 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         ),
         None => "未登录".to_string(),
     };
-    let (service, style) = if let Some((_, port)) = &app.server {
-        (
+    // 端口上是谁在服务，分四种情况说清楚。原来只判断「本进程有没有启动服务」，
+    // 于是别的终端里跑着 serve 时这里仍然显示「未启动」，会让人误以为需要再按 s。
+    let port = app.settings.port;
+    let (service, style) = match &app.occupant {
+        crate::health::Occupant::Wbhub { .. } if app.owns_server() => (
             format!("服务运行中 :{port}"),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        (
+        ),
+        crate::health::Occupant::Wbhub { version } => (
+            format!("外部实例 {version} :{port}"),
+            Style::default().fg(Color::Cyan),
+        ),
+        crate::health::Occupant::Something(_) => (
+            format!("端口 {port} 被占用"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        crate::health::Occupant::Nothing => (
             "服务未启动".to_string(),
             Style::default().fg(Color::DarkGray),
-        )
+        ),
     };
     let right = if app.inflight > 0 {
         format!("{service} · 刷新中")
@@ -253,7 +265,7 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     let hints = match app.page {
         Page::Overview | Page::Models | Page::Calls => "q 退出  Tab 切换  r 刷新  s 启停服务",
         Page::Growth => "q 退出  Tab 切换  r 刷新  c 签到  d 日常  t 旅行  n 夜猫子",
-        Page::Settings => "q 退出  Tab 切换  ↑↓ 选择  ←→ 调整  Enter 切换  k 换密钥",
+        Page::Settings => "q 退出  ←→/Tab 切页  ↑↓ 选择  Enter 编辑/切换  k 换密钥",
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -290,7 +302,10 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
         .split(area);
 
     frame.render_widget(
-        Paragraph::new(account_lines).block(section("账号与额度")),
+        Paragraph::new(account_lines).block(section(&format!(
+            "账号与额度 · wbhub {}",
+            crate::build_version()
+        ))),
         rows[0],
     );
     frame.render_widget(
@@ -328,20 +343,35 @@ fn overview_account_lines(app: &App) -> Vec<Line<'static>> {
         Some(balance) if balance.unlimited => {
             lines.push(kv_colored("剩余积分", "不限", Color::Green))
         }
-        Some(balance) => lines.push(Line::from(vec![
-            Span::styled(pad("剩余积分", LABEL), Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                credits(balance.total),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(if balance.cycle_end.is_empty() {
-                String::new()
-            } else {
-                format!("    周期结束 {}", balance.cycle_end)
-            }),
-        ])),
+        Some(balance) => {
+            let active = balance
+                .accounts
+                .iter()
+                .filter(|a| !a.expired && a.remain > 0.0)
+                .count();
+            lines.push(Line::from(vec![
+                Span::styled(pad("剩余积分", LABEL), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    credits(balance.total),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    // 总数是若干个赠送包的和，把包数说出来才核对得上。
+                    format!("    {active} 个有效包"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    if balance.cycle_end.is_empty() {
+                        String::new()
+                    } else {
+                        format!("    最近到期 {}", balance.cycle_end)
+                    },
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        }
         None => lines.push(kv_colored("剩余积分", "查询中或不可用", Color::DarkGray)),
     }
 
@@ -437,11 +467,29 @@ fn overview_api_lines(app: &App) -> Vec<Line<'static>> {
         &format!("{} 个（按 r 刷新）", app.models.len()),
     ));
     lines.push(kv("已存账号", &format!("{} 个", app.accounts.len())));
-    if !app.running() {
-        lines.push(Line::from(Span::styled(
+    match &app.occupant {
+        crate::health::Occupant::Nothing => lines.push(Line::from(Span::styled(
             "  按 s 启动服务",
             Style::default().fg(Color::DarkGray),
-        )));
+        ))),
+        crate::health::Occupant::Wbhub { version } if app.owns_server() => {
+            lines.push(Line::from(Span::styled(
+                "  本进程提供（按 s 停止）",
+                Style::default().fg(Color::Green),
+            )))
+        }
+        crate::health::Occupant::Wbhub { version } => lines.push(Line::from(vec![
+            Span::styled("  由外部实例提供（wbhub ", Style::default().fg(Color::Cyan)),
+            Span::styled(version.clone(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "），本界面只负责查看；按 s 会另起一个并撞端口",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])),
+        crate::health::Occupant::Something(hint) => lines.push(Line::from(Span::styled(
+            format!("  端口被别的程序占着：{hint}"),
+            Style::default().fg(Color::Yellow),
+        ))),
     }
     lines
 }
@@ -834,16 +882,27 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &App) {
         rows.push(Row::new(cells).style(style));
     };
 
+    // 正在编辑的那一行把输入框画出来，光标位置用一个竖线示意。
+    let cell = |row: usize, text: String| -> Vec<Span<'static>> {
+        match &app.editing {
+            Some((editing_row, buffer)) if *editing_row == row => vec![
+                Span::styled(buffer.clone(), Style::default().fg(Color::Yellow)),
+                Span::styled("▏", Style::default().fg(Color::Yellow)),
+            ],
+            _ => vec![Span::raw(text)],
+        }
+    };
+
     add(
         "端口",
-        vec![Span::raw(app.settings.port.to_string())],
-        "← → 调整（每次 10）",
+        cell(0, app.settings.port.to_string()),
+        "Enter 编辑，再回车确认",
     );
     add("局域网", vec![lan], "Enter 开关，需要重启服务");
     add(
         "调用记录上限",
-        vec![Span::raw(app.settings.call_log_limit.to_string())],
-        "← → 调整（每次 100）",
+        cell(2, app.settings.call_log_limit.to_string()),
+        "Enter 编辑，再回车确认",
     );
     add(
         "API Key",
@@ -857,8 +916,8 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &App) {
     );
     add(
         "模型刷新间隔",
-        vec![Span::raw(format!("{} 分钟", app.settings.refresh_minutes))],
-        "← → 调整（每次 5）",
+        cell(3, app.settings.refresh_minutes.to_string()),
+        "Enter 编辑（分钟），再回车确认",
     );
     add("服务日志", vec![verbose], "Enter 开关");
 
@@ -871,7 +930,7 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &App) {
                 Constraint::Min(20),
             ],
         )
-        .block(section("设置")),
+        .block(section(&format!("设置 · wbhub {}", crate::build_version()))),
         area,
     );
 }
