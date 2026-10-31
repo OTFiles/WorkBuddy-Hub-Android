@@ -140,9 +140,14 @@ jobs:
               CC="$TOOLCHAIN/bin/armv7a-linux-androideabi${API_LEVEL}-clang" ;;
           esac
           AR="$TOOLCHAIN/bin/llvm-ar"
+          # 变量名有讲究，两种拼写都要给：
+          #   CC_<target>（连字符保留）—— cc-rs 给 ring 找编译器时用这个；
+          #   CARGO_TARGET_<TARGET>（大写加下划线）—— cargo 给链接器用这个。
+          # 只给全大写的那种，cc-rs 认不出来，会退回 `arm-linux-androideabi-clang`
+          # 然后报 ToolNotFound。
+          export "CC_${{ matrix.target }}=$CC"
+          export "AR_${{ matrix.target }}=$AR"
           TARGET_UPPER=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
-          export "CC_${TARGET_UPPER}=$CC"
-          export "AR_${TARGET_UPPER}=$AR"
           export "CARGO_TARGET_${TARGET_UPPER}_LINKER=$CC"
           cargo build --release --target "${{ matrix.target }}" --locked
 
