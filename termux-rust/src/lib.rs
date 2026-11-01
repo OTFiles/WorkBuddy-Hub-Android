@@ -10,6 +10,7 @@ pub mod bridge;
 pub mod calllog;
 pub mod cli;
 pub mod doctor;
+pub mod format;
 pub mod growth;
 pub mod health;
 pub mod http;

@@ -16,6 +16,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 
+// 在 crate 内转出，测试和别的模块都能用同一份实现。
+pub(crate) use crate::format::{credits, pad, thousands};
+
 use super::{App, Page};
 
 pub type Backend = CrosstermBackend<std::io::Stdout>;
@@ -41,11 +44,6 @@ pub fn leave(terminal: &mut Terminal<Backend>) -> Result<()> {
 // ---------------------------------------------------------------------- //
 // 小工具
 // ---------------------------------------------------------------------- //
-
-/// 两位小数，用于积分。
-pub fn credits(value: f64) -> String {
-    format!("{value:.2}")
-}
 
 /// 按显示宽度截断，超出部分用省略号。
 ///
@@ -75,37 +73,6 @@ pub fn fit(text: &str, width: usize) -> String {
         out.push(ch);
     }
     out
-}
-
-/// 按**显示宽度**右侧补空格。
-///
-/// `format!("{:<12}")` 数的是 char，一个汉字在终端里占两列，于是中文标签的表
-/// 格会一行比一行靠右。这里按终端列数补，表格才对得齐。
-pub fn pad(text: &str, width: usize) -> String {
-    use unicode_width::UnicodeWidthStr;
-    let used = text.width();
-    if used >= width {
-        return text.to_string();
-    }
-    format!("{text}{}", " ".repeat(width - used))
-}
-
-/// 千分位，数字大了以后一眼能读出量级。
-pub fn thousands(value: i64) -> String {
-    let negative = value < 0;
-    let digits = value.unsigned_abs().to_string();
-    let mut out = String::new();
-    for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    if negative {
-        format!("-{out}")
-    } else {
-        out
-    }
 }
 
 fn outcome_style(outcome: &str) -> Style {
@@ -344,11 +311,7 @@ fn overview_account_lines(app: &App) -> Vec<Line<'static>> {
             lines.push(kv_colored("剩余积分", "不限", Color::Green))
         }
         Some(balance) => {
-            let active = balance
-                .accounts
-                .iter()
-                .filter(|a| !a.expired && a.remain > 0.0)
-                .count();
+            let with_credit = balance.accounts.iter().filter(|a| a.remain > 0.0).count();
             lines.push(Line::from(vec![
                 Span::styled(pad("剩余积分", LABEL), Style::default().fg(Color::DarkGray)),
                 Span::styled(
@@ -359,7 +322,10 @@ fn overview_account_lines(app: &App) -> Vec<Line<'static>> {
                 ),
                 Span::styled(
                     // 总数是若干个赠送包的和，把包数说出来才核对得上。
-                    format!("    {active} 个有效包"),
+                    format!(
+                        "    {} 个包（{with_credit} 个有余量）",
+                        balance.accounts.len()
+                    ),
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
@@ -938,15 +904,6 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn thousands_group_digits() {
-        assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(999), "999");
-        assert_eq!(thousands(1000), "1,000");
-        assert_eq!(thousands(1234567), "1,234,567");
-        assert_eq!(thousands(-1234), "-1,234");
-    }
 
     #[test]
     fn fit_respects_double_width_characters() {

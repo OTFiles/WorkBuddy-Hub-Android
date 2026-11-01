@@ -155,18 +155,12 @@ async fn fetch_personal_credits(account: &SavedAccount) -> Result<Balance> {
         // A positive cycle size means the quota is cyclical and the cycle
         // remainder is the authoritative figure; otherwise the lifetime
         // remainder applies.
-        let remain = if size > 0.0 || cycle_remain > 0.0 || cycle_used > 0.0 {
-            cycle_remain
-        } else {
-            capacity_remain
-        }
-        .max(0.0);
-        // `Status = 3` 是上游的「已过期」。签到攒出来的赠送包过期后仍然留在响应
-        // 里，把它们算进余额是最容易出错的地方。
+        let remain = package_remain(size, cycle_remain, cycle_used, capacity_remain);
+        // `Status = 3` 只是「已过期」的标记，**不能**据此从总额里扣掉：过期包在
+        // 被清零之前还带着余量，而参考实现和上游都是逐行无条件累加的。之前按这个
+        // 标记过滤，结果正好比 App 少了 500（那个 500 的包当时已标过期但余量还在）。
         let expired = row.get("Status").and_then(Value::as_i64) == Some(3);
-        if !expired {
-            total += remain;
-        }
+        total += remain;
         let name = row
             .get("PackageName")
             .and_then(Value::as_str)
@@ -340,6 +334,29 @@ async fn send(
     Ok(text)
 }
 
+/// 单个套餐的剩余额度。
+///
+/// 口径照抄上游与 `workbuddy-manager`：有周期额度时只看 Cycle 三字段，并把余量
+/// 钳进 `[0, size]`，再用已用量反修正一次；没有周期额度时才退回 `CapacityRemain`。
+///
+/// 这个钳位不是洁癖：腾讯偶发 `CycleCapacityRemain > CycleCapacitySize` 的脏数据，
+/// 只钳负值会**高估**余额，用户就会看到比 App 多的数字。
+fn package_remain(size: f64, cycle_remain: f64, cycle_used: f64, capacity_remain: f64) -> f64 {
+    if size > 0.0 {
+        let mut remain = cycle_remain.max(0.0).min(size);
+        let mut used = size - remain;
+        if cycle_used > used {
+            used = cycle_used;
+            if size >= used {
+                remain = size - used;
+            }
+        }
+        remain
+    } else {
+        capacity_remain.max(0.0)
+    }
+}
+
 fn number(row: &Value, key: &str) -> f64 {
     match row.get(key) {
         Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
@@ -445,6 +462,33 @@ mod tests {
     fn a_non_json_body_is_reported_with_a_preview() {
         let error = Envelope::parse("<html>502</html>").unwrap_err();
         assert!(error.to_string().contains("<html>502</html>"));
+    }
+
+    #[test]
+    fn an_expired_package_with_credit_still_counts() {
+        // 这条是给「Rust 少 500」那个 bug 钉的桩：过期标记只用于展示，不参与求和。
+        assert_eq!(package_remain(500.0, 500.0, 0.0, 500.0), 500.0);
+    }
+
+    #[test]
+    fn remain_is_clamped_into_the_package_size() {
+        // 上游偶发余量大于总量，只钳负值会高估。
+        assert_eq!(package_remain(100.0, 250.0, 0.0, 250.0), 100.0);
+        assert_eq!(package_remain(100.0, -30.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn the_used_counter_corrects_a_stale_remain() {
+        // 余量写的是 100，但已用写到 60：真实余量是 40。
+        assert_eq!(package_remain(100.0, 100.0, 60.0, 100.0), 40.0);
+        // 已用量超过总量属于脏数据，此时保留按余量算的结果，不要算出负数。
+        assert_eq!(package_remain(100.0, 100.0, 150.0, 100.0), 100.0);
+    }
+
+    #[test]
+    fn without_a_cycle_size_the_lifetime_remainder_is_used() {
+        assert_eq!(package_remain(0.0, 0.0, 0.0, 123.0), 123.0);
+        assert_eq!(package_remain(0.0, 0.0, 0.0, -5.0), 0.0);
     }
 
     #[test]

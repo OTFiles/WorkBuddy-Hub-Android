@@ -745,9 +745,10 @@ mod tests {
     }
 
     #[test]
-    fn money_is_rendered_with_two_decimals() {
-        assert_eq!(ui::credits(1135.0), "1135.00");
+    fn money_drops_the_decimals_when_they_are_zero() {
+        assert_eq!(ui::credits(1884.0), "1884");
         assert_eq!(ui::credits(0.5), "0.50");
+        assert_eq!(ui::credits(12.345), "12.35");
     }
 
     #[test]

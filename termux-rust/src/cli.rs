@@ -808,16 +808,16 @@ async fn balance_cmd(store: &Store, args: BalanceArgs) -> Result<()> {
         crate::say!("额度：不限");
         return Ok(());
     }
-    crate::say!("剩余：{:.2}", balance.total);
-    // 把「这个数是怎么来的」说出来：签到一次就多一个赠送包，包会越来越多、过期的
-    // 还留着，只给一个总数的话没人能核对。
-    let active = balance
-        .accounts
-        .iter()
-        .filter(|a| !a.expired && a.remain > 0.0)
-        .count();
+    crate::say!("剩余：{}", crate::format::credits(balance.total));
+    // 把「这个数是怎么来的」说出来：签到一次就多一个赠送包，包会越来越多，过期
+    // 的包也还留在响应里，只给一个总数没人能核对。
+    //
+    // 注意过期包**是计入总额的**（上游和参考实现都逐行累加），这里只是标出来，
+    // 免得用户以为过期就等于不显示。
+    let total_rows = balance.accounts.len();
+    let with_credit = balance.accounts.iter().filter(|a| a.remain > 0.0).count();
     let expired = balance.accounts.iter().filter(|a| a.expired).count();
-    crate::say!("构成：{active} 个有效包（另有 {expired} 个已过期，不计入）");
+    crate::say!("构成：{total_rows} 个包，其中 {with_credit} 个还有余量、{expired} 个已过期");
     if !balance.cycle_end.is_empty() {
         crate::say!("最近到期：{}", balance.cycle_end);
     }
@@ -825,15 +825,15 @@ async fn balance_cmd(store: &Store, args: BalanceArgs) -> Result<()> {
         crate::say!();
         for account in &balance.accounts {
             crate::say!(
-                "  {:<30} 余 {:<9.2} 共 {:<9.2} {:<20} {}",
-                account.name,
-                account.remain,
-                account.size,
-                account.cycle_end,
+                "  {} 余 {} 共 {} {} {}",
+                crate::format::pad(&account.name, 30),
+                crate::format::pad(&crate::format::credits(account.remain), 8),
+                crate::format::pad(&crate::format::credits(account.size), 8),
+                crate::format::pad(&account.cycle_end, 20),
                 if account.expired { "已过期" } else { "" }
             );
         }
-    } else if active > 1 {
+    } else if total_rows > 1 {
         crate::say!();
         crate::say!("（`wbhub balance --detail` 可以逐个核对）");
     }
@@ -1080,7 +1080,7 @@ fn calls_cmd(store: &Store, args: CallsArgs) -> Result<()> {
             summary.completion_tokens,
             summary.prompt_tokens + summary.completion_tokens
         );
-        crate::say!("积分消耗：{:.2}", summary.credits);
+        crate::say!("积分消耗：{}", crate::format::credits(summary.credits));
         if !summary.by_model.is_empty() {
             crate::say!();
             for (model, count) in &summary.by_model {
@@ -1144,7 +1144,7 @@ fn calls_cmd(store: &Store, args: CallsArgs) -> Result<()> {
             result,
             record.prompt_tokens,
             record.completion_tokens,
-            format!("{:.2}", record.credits),
+            crate::format::credits(record.credits),
             format!("{origin} {detail}").trim_end()
         );
     }
@@ -1225,7 +1225,7 @@ async fn stats_cmd(store: &Store, args: StatsArgs) -> Result<()> {
         summary.completion_tokens,
         summary.prompt_tokens + summary.completion_tokens
     );
-    println!("已消耗积分 ：{:.2}", summary.credits);
+    println!("已消耗积分 ：{}", crate::format::credits(summary.credits));
     if !summary.by_model.is_empty() {
         let mut models: Vec<(&String, &u64)> = summary.by_model.iter().collect();
         models.sort_by(|a, b| b.1.cmp(a.1));
@@ -1239,9 +1239,9 @@ async fn stats_cmd(store: &Store, args: StatsArgs) -> Result<()> {
     match balance {
         Some(balance) if balance.unlimited => println!("剩余积分 ：不限"),
         Some(balance) => {
-            println!("剩余积分 ：{:.2}", balance.total);
+            println!("剩余积分 ：{}", crate::format::credits(balance.total));
             if !balance.cycle_end.is_empty() {
-                println!("周期结束 ：{}", balance.cycle_end);
+                println!("最近到期 ：{}", balance.cycle_end);
             }
         }
         None if account.is_none() => println!("剩余积分 ：未登录，无法查询"),
