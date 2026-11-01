@@ -271,9 +271,18 @@ pub async fn run(store: &Store, settings: &Settings) -> Result<Report> {
         match tokio::time::timeout(STEP_TIMEOUT, crate::upstream::fetch_credits(account_ref)).await
         {
             Ok(Ok(balance)) if balance.unlimited => steps.push(Step::ok("额度接口", "不限")),
-            Ok(Ok(balance)) => {
-                steps.push(Step::ok("额度接口", format!("剩余 {:.2}", balance.total)))
-            }
+            Ok(Ok(balance)) => steps.push(Step::ok(
+                "额度接口",
+                format!(
+                    "剩余 {}{}",
+                    crate::format::credits(balance.total),
+                    if balance.plan_name.is_empty() {
+                        String::new()
+                    } else {
+                        format!("（{}）", balance.plan_name)
+                    }
+                ),
+            )),
             Ok(Err(error)) => steps.push(Step::fail("额度接口", format!("{error:#}"))),
             Err(_) => steps.push(Step::fail("额度接口", "超时")),
         }

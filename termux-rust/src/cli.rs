@@ -799,6 +799,15 @@ async fn balance_cmd(store: &Store, args: BalanceArgs) -> Result<()> {
                 "unlimited": a.unlimited,
                 "expired": a.expired,
             })).collect::<Vec<_>>(),
+            "plan_name": balance.plan_name,
+            "is_paid": balance.is_paid,
+            "groups": balance.groups.iter().map(|g| json!({
+                "kind": g.kind,
+                "name": g.name,
+                "remain": g.remain,
+                "size": g.size,
+                "count": g.count,
+            })).collect::<Vec<_>>(),
         });
         crate::say!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -809,6 +818,36 @@ async fn balance_cmd(store: &Store, args: BalanceArgs) -> Result<()> {
         return Ok(());
     }
     crate::say!("剩余：{}", crate::format::credits(balance.total));
+    if !balance.plan_name.is_empty() {
+        crate::say!(
+            "套餐：{}{}",
+            balance.plan_name,
+            if balance.is_paid {
+                ""
+            } else {
+                "（免费版）"
+            }
+        );
+    }
+    // 分组是官方口径：套餐自带的积分（体验版每月 500）**不在** get-user-resource
+    // 的返回里，只在这个汇总里能看到，所以必须单独列出来。
+    let groups: Vec<&crate::upstream::CreditGroup> = balance
+        .groups
+        .iter()
+        .filter(|g| g.remain > 0.0 || g.size > 0.0)
+        .collect();
+    if !groups.is_empty() {
+        crate::say!("构成：");
+        for group in groups {
+            crate::say!(
+                "  {} 余 {}（共 {}，{} 项）",
+                crate::format::pad(&group.name, 14),
+                crate::format::credits(group.remain),
+                crate::format::credits(group.size),
+                group.count
+            );
+        }
+    }
     // 把「这个数是怎么来的」说出来：签到一次就多一个赠送包，包会越来越多，过期
     // 的包也还留在响应里，只给一个总数没人能核对。
     //
@@ -817,7 +856,7 @@ async fn balance_cmd(store: &Store, args: BalanceArgs) -> Result<()> {
     let total_rows = balance.accounts.len();
     let with_credit = balance.accounts.iter().filter(|a| a.remain > 0.0).count();
     let expired = balance.accounts.iter().filter(|a| a.expired).count();
-    crate::say!("构成：{total_rows} 个包，其中 {with_credit} 个还有余量、{expired} 个已过期");
+    crate::say!("明细：{total_rows} 个包，其中 {with_credit} 个还有余量、{expired} 个已过期");
     if !balance.cycle_end.is_empty() {
         crate::say!("最近到期：{}", balance.cycle_end);
     }

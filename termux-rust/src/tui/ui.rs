@@ -321,9 +321,15 @@ fn overview_account_lines(app: &App) -> Vec<Line<'static>> {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    // 总数是若干个赠送包的和，把包数说出来才核对得上。
+                    // 总额包含套餐自带的那部分（体验版每月 500），所以套餐名和包数
+                    // 都要写出来，否则用户没法核对。
                     format!(
-                        "    {} 个包（{with_credit} 个有余量）",
+                        "    {} · {} 个包（{with_credit} 个有余量）",
+                        if balance.plan_name.is_empty() {
+                            "—".to_string()
+                        } else {
+                            format!("{}（免费版）", balance.plan_name)
+                        },
                         balance.accounts.len()
                     ),
                     Style::default().fg(Color::DarkGray),

@@ -24,6 +24,16 @@ pub struct CreditAccount {
     pub expired: bool,
 }
 
+/// 一组积分。官方把它分成「套餐基础 / 套餐赠送 / 购买 / 平台奖励」四类。
+#[derive(Debug, Clone, Default)]
+pub struct CreditGroup {
+    pub kind: String,
+    pub name: String,
+    pub remain: f64,
+    pub size: f64,
+    pub count: i64,
+}
+
 /// Aggregated balance.
 #[derive(Debug, Clone, Default)]
 pub struct Balance {
@@ -31,6 +41,12 @@ pub struct Balance {
     pub accounts: Vec<CreditAccount>,
     pub cycle_end: String,
     pub unlimited: bool,
+    /// 账号当前的套餐名，例如「体验版」。免费体验版每月自带 500 积分，那部分**不在**
+    /// `get-user-resource` 的返回里，只在汇总接口里。
+    pub plan_name: String,
+    pub is_paid: bool,
+    /// 按官方口径分好的组，用来解释总额是怎么构成的。
+    pub groups: Vec<CreditGroup>,
 }
 
 /// Result of a check-in attempt.
@@ -90,13 +106,131 @@ pub async fn fetch_models(account: &SavedAccount) -> Result<Vec<wire::ProtoModel
     wire::parse_models(&text).map_err(|e| anyhow::anyhow!(e))
 }
 
-/// Aggregated remaining credit. Enterprise accounts read a different endpoint.
+/// 查询剩余积分。
+///
+/// 个人账号走两段：
+///
+/// 1. `get-user-resource-summary` —— **总额以它为准**。它把积分分成「套餐基础 /
+///    套餐赠送 / 购买 / 平台奖励」四组，App 上显示的那个数就是它的 `TotalCredits`。
+/// 2. `get-user-resource` —— 逐包明细，用来算最近到期时间、以及 `--detail` 的列表。
+///
+/// 只查第 2 个是错的：它只返回「平台奖励积分」（签到攒出来的赠送包），不含套餐自带
+/// 的基础积分。免费体验版每月那 500 就在基础积分里，所以只查明细会正好少 500——
+/// 这正是一开始和 App 对不上的原因。
+///
+/// 注意这两个路径**不带 `/v2` 前缀**（带了会 404），与 daily-checkin 不同。
 pub async fn fetch_credits(account: &SavedAccount) -> Result<Balance> {
     if account.region() == Region::Cn && account.enterprise_id().is_some() {
-        fetch_enterprise_credits(account).await
-    } else {
-        fetch_personal_credits(account).await
+        return fetch_enterprise_credits(account).await;
     }
+    let summary = fetch_personal_summary(account).await;
+    let detail = fetch_personal_credits(account).await;
+    match (summary, detail) {
+        (Ok(summary), Ok(detail)) => Ok(merge(summary, detail)),
+        // 汇总接口在老账号/其它站点上可能不存在，这时退回只按明细算，至少还能用。
+        (Err(_), Ok(detail)) => Ok(detail),
+        (Ok(summary), Err(_)) => Ok(summary),
+        (Err(summary_error), Err(_)) => Err(summary_error),
+    }
+}
+
+fn merge(mut summary: Balance, detail: Balance) -> Balance {
+    summary.accounts = detail.accounts;
+    summary.cycle_end = detail.cycle_end;
+    summary.unlimited = false;
+    summary
+}
+
+/// 汇总接口：总额与分组。
+async fn fetch_personal_summary(account: &SavedAccount) -> Result<Balance> {
+    let region = account.region();
+    let url = format!(
+        "{}/billing/meter/get-user-resource-summary",
+        region.billing_base()
+    );
+    let headers = wire::billing_headers(
+        region,
+        &account.access_token,
+        &account.uid,
+        &account.domain,
+        account.enterprise_id(),
+    );
+    let body = resource_query_body();
+    let (status, text) = http::request_with_status(&url, "POST", &headers, Some(&body)).await?;
+    if status == 401 || status == 403 {
+        bail!("账号会话已失效（HTTP {status}），请重新运行 `wbhub login`");
+    }
+    if !(200..300).contains(&status) {
+        bail!("汇总接口返回 HTTP {status}");
+    }
+    let envelope = Envelope::parse(&text)?;
+    if envelope.code != 0 {
+        bail!("额度汇总被拒绝：{}", envelope.msg);
+    }
+    Ok(parse_summary(&envelope.data))
+}
+
+/// 把汇总接口的 `data` 解析成 `Balance`。抽成纯函数是为了能离线测。
+fn parse_summary(data: &Value) -> Balance {
+    let mut groups = Vec::new();
+    if let Some(rows) = data.get("CreditGroups").and_then(Value::as_array) {
+        for row in rows {
+            groups.push(CreditGroup {
+                kind: row
+                    .get("Kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                name: row
+                    .get("Name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                remain: number(row, "CycleRemainCapacity").max(0.0),
+                size: number(row, "CycleTotalCapacity"),
+                count: number(row, "TotalCount") as i64,
+            });
+        }
+    }
+    // `TotalCredits` 是字符串形式的定点小数（"1876.04"），`number()` 两种都吃。
+    let mut total = number(data, "TotalCredits");
+    if total == 0.0 && !groups.is_empty() {
+        // 万一上游漏了 TotalCredits，分组求和是等价的兜底。
+        total = groups.iter().map(|g| g.remain).sum();
+    }
+    Balance {
+        total,
+        accounts: Vec::new(),
+        cycle_end: String::new(),
+        unlimited: false,
+        plan_name: data
+            .get("SubscriptionPackageName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        is_paid: data
+            .get("IsPaidUser")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        groups,
+    }
+}
+
+/// 查询套餐明细用的请求体。
+fn resource_query_body() -> String {
+    let now = chrono::Local::now();
+    json!({
+        "PageNumber": 1,
+        "PageSize": 100,
+        "ProductCode": "p_tcaca",
+        "Status": [0, 3],
+        "PackageEndTimeRangeBegin": now.format("%Y-%m-%d %H:%M:%S").to_string(),
+        // 上游自己也用「往后 101 年」这个粗过滤窗口，照抄即可。
+        "PackageEndTimeRangeEnd": (now + chrono::Duration::days(365 * 101))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+    })
+    .to_string()
 }
 
 async fn fetch_personal_credits(account: &SavedAccount) -> Result<Balance> {
@@ -196,7 +330,8 @@ async fn fetch_personal_credits(account: &SavedAccount) -> Result<Balance> {
         total,
         accounts: result,
         cycle_end,
-        unlimited: false,
+        // 明细接口本身不含套餐/分组信息，那些由汇总接口补上（见 `merge`）。
+        ..Default::default()
     })
 }
 
@@ -273,6 +408,7 @@ async fn fetch_enterprise_credits(account: &SavedAccount) -> Result<Balance> {
             }],
             cycle_end: String::new(),
             unlimited: true,
+            ..Default::default()
         });
     }
     let resolved_used = used.ok_or_else(|| anyhow::anyhow!("企业额度响应里有额度但没有用量"))?;
@@ -289,6 +425,7 @@ async fn fetch_enterprise_credits(account: &SavedAccount) -> Result<Balance> {
         }],
         cycle_end: reset,
         unlimited: false,
+        ..Default::default()
     })
 }
 
@@ -462,6 +599,51 @@ mod tests {
     fn a_non_json_body_is_reported_with_a_preview() {
         let error = Envelope::parse("<html>502</html>").unwrap_err();
         assert!(error.to_string().contains("<html>502</html>"));
+    }
+
+    #[test]
+    fn the_summary_total_includes_the_plan_base_credits() {
+        // 真实响应里 App 显示的就是 TotalCredits；它等于「平台奖励」+「套餐基础」，
+        // 而 get-user-resource 只返回前者 —— 这就是少 500 的根源。
+        let data = json!({
+            "TotalCredits": "1876.04",
+            "SubscriptionPackageName": "体验版",
+            "IsPaidUser": false,
+            "CreditGroups": [
+                {"Kind": "plan_base", "Name": "套餐基础积分",
+                 "CycleTotalCapacity": "500", "CycleRemainCapacity": "500", "TotalCount": 1},
+                {"Kind": "plan_bonus", "Name": "套餐赠送积分",
+                 "CycleTotalCapacity": "0", "CycleRemainCapacity": "0", "TotalCount": 0},
+                {"Kind": "addon", "Name": "购买积分",
+                 "CycleTotalCapacity": "0", "CycleRemainCapacity": "0", "TotalCount": 0},
+                {"Kind": "benefit", "Name": "平台奖励积分",
+                 "CycleTotalCapacity": "5400", "CycleRemainCapacity": "1376.04", "TotalCount": 12}
+            ]
+        });
+        let balance = parse_summary(&data);
+        assert_eq!(balance.total, 1876.04);
+        assert_eq!(balance.plan_name, "体验版");
+        assert!(!balance.is_paid);
+        assert_eq!(balance.groups.len(), 4);
+        let base = balance
+            .groups
+            .iter()
+            .find(|g| g.kind == "plan_base")
+            .unwrap();
+        assert_eq!(base.remain, 500.0);
+        let benefit = balance.groups.iter().find(|g| g.kind == "benefit").unwrap();
+        assert_eq!(benefit.count, 12);
+    }
+
+    #[test]
+    fn a_summary_without_a_total_falls_back_to_the_groups() {
+        let data = json!({
+            "CreditGroups": [
+                {"Kind": "plan_base", "CycleRemainCapacity": "500"},
+                {"Kind": "benefit", "CycleRemainCapacity": "120.5"}
+            ]
+        });
+        assert_eq!(parse_summary(&data).total, 620.5);
     }
 
     #[test]
