@@ -13,6 +13,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::store::write_private;
+use crate::wire::PromptMode;
 
 pub const DEFAULT_PORT: u16 = 8765;
 
@@ -51,6 +52,12 @@ pub struct Settings {
     /// Print a line per request.
     #[serde(default = "default_true")]
     pub verbose: bool,
+    /// 客户端系统提示词的处理方式：off / prefix / suffix / replace。
+    #[serde(default)]
+    pub system_prompt_mode: String,
+    /// 要注入的系统提示词正文。
+    #[serde(default)]
+    pub system_prompt: String,
 }
 
 impl Default for Settings {
@@ -63,6 +70,8 @@ impl Default for Settings {
             call_log_limit: default_call_limit(),
             refresh_minutes: 30,
             verbose: true,
+            system_prompt_mode: PromptMode::Off.name().to_string(),
+            system_prompt: String::new(),
         }
     }
 }
@@ -111,6 +120,16 @@ impl Settings {
         self.api_key = random_key();
         self.save(dir)?;
         Ok(self.api_key.clone())
+    }
+
+    /// 当前生效的系统提示词设置。
+    pub fn system_prompt(&self) -> crate::wire::SystemPrompt<'_> {
+        let mode = PromptMode::parse(&self.system_prompt_mode).unwrap_or(PromptMode::Off);
+        crate::wire::SystemPrompt::new(mode, &self.system_prompt)
+    }
+
+    pub fn prompt_mode(&self) -> PromptMode {
+        PromptMode::parse(&self.system_prompt_mode).unwrap_or(PromptMode::Off)
     }
 
     pub fn rotate_lan_key(&mut self, dir: &Path) -> Result<String> {

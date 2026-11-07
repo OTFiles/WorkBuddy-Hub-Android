@@ -578,7 +578,14 @@ async fn chat(
         unmapped(peer.ip())
     };
 
-    match upstream::chat_stream(&account, &request_body).await {
+    // 系统提示词设置随请求读取：TUI 里改完立刻生效，不用重启服务。
+    // 先把字符串复制出来，`SystemPrompt` 借用它，不能借用那把读锁的临时值。
+    let (prompt_mode, prompt_text) = {
+        let settings = bridge.settings.read().await;
+        (settings.prompt_mode(), settings.system_prompt.clone())
+    };
+    let prompt = wire::SystemPrompt::new(prompt_mode, &prompt_text);
+    match upstream::chat_stream_with_prompt(&account, &request_body, prompt).await {
         ChatOpen::Failed {
             status,
             kind,

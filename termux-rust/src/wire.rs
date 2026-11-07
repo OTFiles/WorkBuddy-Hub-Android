@@ -235,7 +235,106 @@ pub fn human_error(status: u16, body: &str) -> String {
 ///
 /// The `developer` rewrite is load-bearing: OpenAI clients emit the system
 /// prompt that way, and the gateway rejects it with 400 code 11128.
+/// 客户端自带的系统提示词要怎么处理。
+///
+/// 这几个选项是给使用者自己选的，目的只有一个：让模型知道它跑在什么环境里。
+/// **不是**用来绕过上游的内容校验——那种改写（把品牌名换成中性词之类）只会让
+/// 请求看起来「更像官方客户端」，属于规避服务方的风控，本项目不做。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptMode {
+    /// 完全透传，不动客户端的提示词。
+    #[default]
+    Off,
+    /// 在客户端自己的 system 之前插一条。
+    Prefix,
+    /// 在消息列表末尾追加一条 system。
+    Suffix,
+    /// 顶掉客户端的第一条 system（没有就插入）。
+    Replace,
+}
+
+impl PromptMode {
+    pub fn parse(value: &str) -> Option<PromptMode> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "关" | "关闭" => Some(PromptMode::Off),
+            "prefix" | "prepend" | "前置" => Some(PromptMode::Prefix),
+            "suffix" | "append" | "追加" => Some(PromptMode::Suffix),
+            "replace" | "替换" => Some(PromptMode::Replace),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PromptMode::Off => "off",
+            PromptMode::Prefix => "prefix",
+            PromptMode::Suffix => "suffix",
+            PromptMode::Replace => "replace",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PromptMode::Off => "关闭（透传）",
+            PromptMode::Prefix => "前置",
+            PromptMode::Suffix => "追加到末尾",
+            PromptMode::Replace => "替换客户端 system",
+        }
+    }
+
+    /// 界面上按回车时轮到的下一个模式。
+    pub fn next(self) -> PromptMode {
+        match self {
+            PromptMode::Off => PromptMode::Prefix,
+            PromptMode::Prefix => PromptMode::Suffix,
+            PromptMode::Suffix => PromptMode::Replace,
+            PromptMode::Replace => PromptMode::Off,
+        }
+    }
+
+    pub fn all() -> [PromptMode; 4] {
+        [
+            PromptMode::Off,
+            PromptMode::Prefix,
+            PromptMode::Suffix,
+            PromptMode::Replace,
+        ]
+    }
+}
+
+/// 要注入的系统提示词。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemPrompt<'a> {
+    pub mode: PromptMode,
+    pub text: &'a str,
+}
+
+impl<'a> SystemPrompt<'a> {
+    pub fn new(mode: PromptMode, text: &'a str) -> SystemPrompt<'a> {
+        SystemPrompt { mode, text }
+    }
+
+    /// 这段提示词是否真的会被用上。
+    fn active(&self) -> Option<&'a str> {
+        if self.mode == PromptMode::Off {
+            return None;
+        }
+        // 空白视为没写：插一条空白 system 反而会触发上游对空白消息的拒绝。
+        let text = self.text.trim();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+}
+
 pub fn prepare_chat_body(source: &str) -> String {
+    prepare_chat_body_with_prompt(source, SystemPrompt::default())
+}
+
+/// 整形请求体，并按 `prompt` 处理系统提示词。
+pub fn prepare_chat_body_with_prompt(source: &str, prompt: SystemPrompt<'_>) -> String {
     let Ok(mut obj) = serde_json::from_str::<Value>(source) else {
         return source.to_string();
     };
@@ -243,8 +342,37 @@ pub fn prepare_chat_body(source: &str) -> String {
         map.insert("stream".into(), Value::Bool(true));
         normalize_developer_role(map);
         normalize_tool_choice(map);
+        apply_system_prompt(map, prompt);
     }
     serde_json::to_string(&obj).unwrap_or_else(|_| source.to_string())
+}
+
+/// 按模式插入 / 追加 / 替换系统提示词。
+fn apply_system_prompt(map: &mut Map<String, Value>, prompt: SystemPrompt<'_>) {
+    let Some(text) = prompt.active() else {
+        return;
+    };
+    let message = json!({"role": "system", "content": text});
+    let Some(messages) = map.get_mut("messages").and_then(Value::as_array_mut) else {
+        map.insert("messages".into(), Value::Array(vec![message]));
+        return;
+    };
+    match prompt.mode {
+        PromptMode::Off => {}
+        // 插在最前面：客户端自己的 system 仍然最后生效，这是使用者写「运行环境
+        // 说明」时想要的顺序。
+        PromptMode::Prefix => messages.insert(0, message),
+        PromptMode::Suffix => messages.push(message),
+        PromptMode::Replace => {
+            let first_system = messages
+                .iter()
+                .position(|m| m.get("role").and_then(Value::as_str) == Some("system"));
+            match first_system {
+                Some(index) => messages[index] = message,
+                None => messages.insert(0, message),
+            }
+        }
+    }
 }
 
 fn normalize_developer_role(map: &mut Map<String, Value>) {
@@ -333,7 +461,15 @@ const INTERNATIONAL_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 /// The international gateway additionally requires a leading `system` message
 /// and rejects the adapter's `off` effort spelling.
 pub fn prepare_international_chat_body(source: &str) -> String {
-    let prepared = prepare_chat_body(source);
+    prepare_international_chat_body_with_prompt(source, SystemPrompt::default())
+}
+
+pub fn prepare_international_chat_body_with_prompt(
+    source: &str,
+    prompt: SystemPrompt<'_>,
+) -> String {
+    // 先按普通规则整形（含注入系统提示词），再补国际版要求的首条 system。
+    let prepared = prepare_chat_body_with_prompt(source, prompt);
     let Ok(mut obj) = serde_json::from_str::<Value>(&prepared) else {
         return prepared;
     };
@@ -820,6 +956,90 @@ mod tests {
             r#"{"messages":[],"tool_choice":{"type":"function","function":{"name":"read"}}}"#;
         let out: Value = serde_json::from_str(&prepare_chat_body(source)).unwrap();
         assert_eq!(out["tool_choice"], json!("read"));
+    }
+
+    #[test]
+    fn prefix_puts_the_prompt_before_the_clients_own_system() {
+        let source = r#"{"messages":[{"role":"system","content":"客户端指令"},{"role":"user","content":"hi"}]}"#;
+        let out: Value = serde_json::from_str(&prepare_chat_body_with_prompt(
+            source,
+            SystemPrompt::new(PromptMode::Prefix, "环境说明"),
+        ))
+        .unwrap();
+        assert_eq!(out["messages"][0]["content"], json!("环境说明"));
+        assert_eq!(out["messages"][1]["content"], json!("客户端指令"));
+        assert_eq!(out["messages"][2]["content"], json!("hi"));
+    }
+
+    #[test]
+    fn suffix_appends_at_the_end() {
+        let source = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
+        let out: Value = serde_json::from_str(&prepare_chat_body_with_prompt(
+            source,
+            SystemPrompt::new(PromptMode::Suffix, "补充"),
+        ))
+        .unwrap();
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], json!("system"));
+        assert_eq!(messages[1]["content"], json!("补充"));
+    }
+
+    #[test]
+    fn replace_overwrites_the_first_system_message_only() {
+        let source = r#"{"messages":[
+            {"role":"system","content":"旧"},
+            {"role":"system","content":"第二条"},
+            {"role":"user","content":"hi"}]}"#;
+        let out: Value = serde_json::from_str(&prepare_chat_body_with_prompt(
+            source,
+            SystemPrompt::new(PromptMode::Replace, "新"),
+        ))
+        .unwrap();
+        assert_eq!(out["messages"][0]["content"], json!("新"));
+        assert_eq!(out["messages"][1]["content"], json!("第二条"));
+    }
+
+    #[test]
+    fn replace_inserts_when_there_is_no_system_message() {
+        let source = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
+        let out: Value = serde_json::from_str(&prepare_chat_body_with_prompt(
+            source,
+            SystemPrompt::new(PromptMode::Replace, "新"),
+        ))
+        .unwrap();
+        assert_eq!(out["messages"][0]["content"], json!("新"));
+        assert_eq!(out["messages"][1]["content"], json!("hi"));
+    }
+
+    #[test]
+    fn off_and_blank_texts_leave_the_body_alone() {
+        let source = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
+        let cases = [
+            SystemPrompt::new(PromptMode::Off, "说明"),
+            SystemPrompt::new(PromptMode::Prefix, "   "),
+            SystemPrompt::default(),
+        ];
+        for prompt in cases {
+            let out: Value =
+                serde_json::from_str(&prepare_chat_body_with_prompt(source, prompt)).unwrap();
+            assert_eq!(out["messages"].as_array().unwrap().len(), 1, "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn prompt_modes_round_trip_through_their_names() {
+        for mode in PromptMode::all() {
+            assert_eq!(PromptMode::parse(mode.name()), Some(mode));
+        }
+        assert_eq!(PromptMode::parse("前置"), Some(PromptMode::Prefix));
+        assert_eq!(PromptMode::parse("nonsense"), None);
+        // 界面上按回车依次轮转，必须能回到原点。
+        let mut mode = PromptMode::Off;
+        for _ in 0..4 {
+            mode = mode.next();
+        }
+        assert_eq!(mode, PromptMode::Off);
     }
 
     #[test]

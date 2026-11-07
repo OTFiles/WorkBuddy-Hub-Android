@@ -36,6 +36,15 @@ const TICK: Duration = Duration::from_millis(250);
 /// 端口占用探测的间隔。
 const PROBE_EVERY: Duration = Duration::from_secs(3);
 
+/// 编辑框收什么字符。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditKind {
+    /// 只收数字，用于端口、条数、分钟。
+    Number,
+    /// 任意字符，用于系统提示词。
+    Text,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Overview,
@@ -124,8 +133,8 @@ pub struct App {
     occupant: crate::health::Occupant,
     /// 端口占用探测的上次时间。
     last_probe: Option<Instant>,
-    /// 正在编辑的数值行：行号 + 已输入的字符。
-    editing: Option<(usize, String)>,
+    /// 正在编辑的行：数值只收数字，文本收任意字符。
+    editing: Option<(usize, String, EditKind)>,
     /// 最近几条一次性动作的结果，最新的在最后。
     log: VecDeque<(String, bool)>,
     settings_row: usize,
@@ -441,18 +450,31 @@ async fn handle_key(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSender<Msg
     }
 }
 
-/// 数值行的编辑：只收数字，Enter 提交，Esc 放弃。
+/// 编辑：Enter 提交，Esc 放弃。数值行只收数字，文本行收任意字符。
 fn handle_edit_key(app: &mut App, key: KeyEvent) {
-    let Some((row, ref mut buffer)) = app.editing else {
+    let Some((row, ref mut buffer, kind)) = app.editing else {
         return;
     };
     match key.code {
-        KeyCode::Char(ch) if ch.is_ascii_digit() => {
-            // 端口最多 5 位，其余 4 位，够用且不会输入到失控。
-            if buffer.len() < 5 {
-                buffer.push(ch);
-            }
+        // 长文本只能一个个退格删太难受，给一个清空键。必须排在下面的 `Char(ch)`
+        // 之前，否则永远匹配不到。
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            buffer.clear();
         }
+        KeyCode::Char(ch) => match kind {
+            EditKind::Number => {
+                // 端口最多 5 位，其余 4 位，够用且不会输到失控。
+                if ch.is_ascii_digit() && buffer.len() < 5 {
+                    buffer.push(ch);
+                }
+            }
+            EditKind::Text => {
+                // 上限只是防手滑，正常一段环境说明远到不了 2000 字。
+                if buffer.chars().count() < 2000 {
+                    buffer.push(ch);
+                }
+            }
+        },
         KeyCode::Backspace => {
             buffer.pop();
         }
@@ -462,10 +484,39 @@ fn handle_edit_key(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             let text = buffer.clone();
             app.editing = None;
-            commit_number(app, row, &text);
+            match kind {
+                EditKind::Number => commit_number(app, row, &text),
+                EditKind::Text => commit_prompt(app, &text),
+            }
         }
         _ => {}
     }
+}
+
+/// 提交系统提示词正文。空白表示清空该项。
+fn commit_prompt(app: &mut App, text: &str) {
+    app.settings.system_prompt = text.trim().to_string();
+    if app.settings.system_prompt.is_empty() {
+        app.note("系统提示词已清空", true);
+        return;
+    }
+    let mode = app.settings.prompt_mode();
+    if mode == crate::wire::PromptMode::Off {
+        app.note(
+            "已保存；但模式是「关闭」，要先在上一行按回车切到前置/追加/替换",
+            false,
+        );
+    } else {
+        app.note(
+            format!(
+                "系统提示词已保存（{}，{} 字）",
+                mode.label(),
+                app.settings.system_prompt.chars().count()
+            ),
+            true,
+        );
+    }
+    persist(app);
 }
 
 /// 把编辑框里的数落进设置。
@@ -480,12 +531,12 @@ fn commit_number(app: &mut App, row: usize, text: &str) {
             app.settings.port = clamped as u16;
             ("端口", clamped, "")
         }
-        2 => {
+        3 => {
             let clamped = value.clamp(100, 20000);
             app.settings.call_log_limit = clamped as usize;
             ("调用记录上限", clamped, "")
         }
-        3 => {
+        4 => {
             let clamped = value.clamp(1, 240);
             app.settings.refresh_minutes = clamped as u64;
             ("模型刷新间隔", clamped, " 分钟")
@@ -569,21 +620,41 @@ async fn handle_growth_key(app: &mut App, key: KeyEvent, tx: &mpsc::UnboundedSen
 }
 
 async fn handle_settings_key(app: &mut App, key: KeyEvent) {
-    const ROWS: usize = 7;
+    const ROWS: usize = 9;
     match key.code {
         KeyCode::Up => app.settings_row = app.settings_row.saturating_sub(1),
         KeyCode::Down => app.settings_row = (app.settings_row + 1).min(ROWS - 1),
         KeyCode::Enter => match app.settings_row {
             // 数值行进入编辑态，回车再确认。
-            0 | 2 | 3 => {
+            0 | 3 | 4 => {
                 let current = match app.settings_row {
                     0 => app.settings.port.to_string(),
-                    2 => app.settings.call_log_limit.to_string(),
+                    3 => app.settings.call_log_limit.to_string(),
                     _ => app.settings.refresh_minutes.to_string(),
                 };
-                app.editing = Some((app.settings_row, current));
+                app.editing = Some((app.settings_row, current, EditKind::Number));
             }
+            // 提示词模式：回车轮转（关闭 → 前置 → 追加 → 替换）。
             1 => {
+                let next = app.settings.prompt_mode().next();
+                app.settings.system_prompt_mode = next.name().to_string();
+                persist(app);
+                app.note(
+                    if next == crate::wire::PromptMode::Off {
+                        "系统提示词：关闭（透传客户端原文）".to_string()
+                    } else if app.settings.system_prompt.trim().is_empty() {
+                        format!("系统提示词：{}；还没写内容，按下一行回车编辑", next.label())
+                    } else {
+                        format!("系统提示词：{}", next.label())
+                    },
+                    true,
+                );
+            }
+            // 提示词正文：文本编辑。
+            2 => {
+                app.editing = Some((2, app.settings.system_prompt.clone(), EditKind::Text));
+            }
+            5 => {
                 app.settings.lan_enabled = !app.settings.lan_enabled;
                 persist(app);
                 app.note(
@@ -595,18 +666,18 @@ async fn handle_settings_key(app: &mut App, key: KeyEvent) {
                     true,
                 );
             }
-            6 => {
+            8 => {
                 app.settings.verbose = !app.settings.verbose;
                 persist(app);
             }
             _ => {}
         },
         KeyCode::Char('k') => match app.settings_row {
-            4 => match app.settings.rotate_api_key(app.store.dir()) {
+            6 => match app.settings.rotate_api_key(app.store.dir()) {
                 Ok(key) => app.note(format!("新的 API Key：{key}"), true),
                 Err(error) => app.note(format!("换密钥失败：{error}"), false),
             },
-            5 => match app.settings.rotate_lan_key(app.store.dir()) {
+            7 => match app.settings.rotate_lan_key(app.store.dir()) {
                 Ok(key) => app.note(format!("新的 LAN Key：{key}"), true),
                 Err(error) => app.note(format!("换密钥失败：{error}"), false),
             },

@@ -1333,6 +1333,22 @@ fn config_cmd(store: &Store, args: ConfigArgs) -> Result<()> {
                 settings.refresh_minutes = value.trim().parse().context("refresh_minutes 需要是数字")?
             }
             "verbose" => settings.verbose = parse_bool(value)?,
+            "system_prompt_mode" => {
+                let mode = crate::wire::PromptMode::parse(value).ok_or_else(|| {
+                    anyhow::anyhow!("模式只能是 off / prefix / suffix / replace")
+                })?;
+                settings.system_prompt_mode = mode.name().to_string();
+            }
+            // `@文件名` 从文件读，方便写多行提示词；否则就是字面值。
+            "system_prompt" => {
+                let text = match value.trim().strip_prefix('@') {
+                    Some(path) => std::fs::read_to_string(path.trim()).map_err(|error| {
+                        anyhow::anyhow!("读不到 {path}：{error}")
+                    })?,
+                    None => value.to_string(),
+                };
+                settings.system_prompt = text.trim().to_string();
+            }
             "api_key" => {
                 let key = value.trim();
                 if key.is_empty() {
@@ -1348,7 +1364,7 @@ fn config_cmd(store: &Store, args: ConfigArgs) -> Result<()> {
                 settings.lan_key = key.to_string();
             }
             other => bail!(
-                "未知设置项 {other}；可用：port、lan_enabled、lan_key、api_key、call_log_limit、refresh_minutes、verbose"
+                "未知设置项 {other}；可用：port、lan_enabled、lan_key、api_key、call_log_limit、refresh_minutes、verbose、system_prompt_mode、system_prompt"
             ),
         }
     }
@@ -1369,6 +1385,20 @@ fn config_cmd(store: &Store, args: ConfigArgs) -> Result<()> {
     }
     if args.json {
         crate::say!("{}", serde_json::to_string_pretty(&settings)?);
+    } else {
+        crate::say!();
+        crate::say!(
+            "系统提示词：{}（{} 字）",
+            settings.prompt_mode().label(),
+            settings.system_prompt.chars().count()
+        );
+        if settings.prompt_mode() != crate::wire::PromptMode::Off
+            && settings.system_prompt.trim().is_empty()
+        {
+            crate::say!(
+                "           模式已开但没写内容，用 --set system_prompt=@文件 或 TUI 里编辑"
+            );
+        }
     }
     Ok(())
 }

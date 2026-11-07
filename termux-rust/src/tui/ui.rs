@@ -855,12 +855,28 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     // 正在编辑的那一行把输入框画出来，光标位置用一个竖线示意。
+    //
+    // 文本可能很长，只显示**末尾**（光标在那儿），前面用省略号收掉；否则整行会被
+    // 顶出屏幕，编辑时看不到自己正在打的字。
     let cell = |row: usize, text: String| -> Vec<Span<'static>> {
         match &app.editing {
-            Some((editing_row, buffer)) if *editing_row == row => vec![
-                Span::styled(buffer.clone(), Style::default().fg(Color::Yellow)),
-                Span::styled("▏", Style::default().fg(Color::Yellow)),
-            ],
+            Some((editing_row, buffer, _)) if *editing_row == row => {
+                let shown = if buffer.chars().count() > 36 {
+                    format!(
+                        "…{}",
+                        buffer
+                            .chars()
+                            .skip(buffer.chars().count() - 35)
+                            .collect::<String>()
+                    )
+                } else {
+                    buffer.clone()
+                };
+                vec![
+                    Span::styled(shown, Style::default().fg(Color::Yellow)),
+                    Span::styled("▏", Style::default().fg(Color::Yellow)),
+                ]
+            }
             _ => vec![Span::raw(text)],
         }
     };
@@ -870,10 +886,35 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &App) {
         cell(0, app.settings.port.to_string()),
         "Enter 编辑，再回车确认",
     );
+    add(
+        "系统提示词",
+        vec![Span::raw(app.settings.prompt_mode().label())],
+        "Enter 轮转：关闭 → 前置 → 追加 → 替换",
+    );
+    // 编辑态显示输入框，静态态显示正文预览。
+    let editing_prompt = matches!(&app.editing, Some((2, _, _)));
+    let prompt_cell = if editing_prompt {
+        cell(2, String::new())
+    } else if app.settings.system_prompt.trim().is_empty() {
+        vec![Span::styled(
+            "（未设置）",
+            Style::default().fg(Color::DarkGray),
+        )]
+    } else {
+        vec![Span::raw(fit(
+            &app.settings.system_prompt.replace('\n', " "),
+            36,
+        ))]
+    };
+    add(
+        "提示词内容",
+        prompt_cell,
+        "Enter 编辑 · Ctrl-U 清空 · Esc 取消",
+    );
     add("局域网", vec![lan], "Enter 开关，需要重启服务");
     add(
         "调用记录上限",
-        cell(2, app.settings.call_log_limit.to_string()),
+        cell(3, app.settings.call_log_limit.to_string()),
         "Enter 编辑，再回车确认",
     );
     add(
@@ -888,7 +929,7 @@ fn draw_settings(frame: &mut Frame, area: Rect, app: &App) {
     );
     add(
         "模型刷新间隔",
-        cell(3, app.settings.refresh_minutes.to_string()),
+        cell(4, app.settings.refresh_minutes.to_string()),
         "Enter 编辑（分钟），再回车确认",
     );
     add("服务日志", vec![verbose], "Enter 开关");

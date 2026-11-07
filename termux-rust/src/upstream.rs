@@ -58,10 +58,19 @@ pub struct CheckinOutcome {
 
 /// Opens a chat stream, forcing `stream: true` and reshaping the body.
 pub async fn chat_stream(account: &SavedAccount, body: &str) -> ChatOpen {
+    chat_stream_with_prompt(account, body, wire::SystemPrompt::default()).await
+}
+
+/// 同上，按调用方给的设置处理系统提示词。
+pub async fn chat_stream_with_prompt(
+    account: &SavedAccount,
+    body: &str,
+    prompt: wire::SystemPrompt<'_>,
+) -> ChatOpen {
     let region = account.region();
     let body = match region {
-        Region::Global => wire::prepare_international_chat_body(body),
-        Region::Cn => wire::prepare_chat_body(body),
+        Region::Global => wire::prepare_international_chat_body_with_prompt(body, prompt),
+        Region::Cn => wire::prepare_chat_body_with_prompt(body, prompt),
     };
     let identity = wire::ChatIdentity::for_region(region);
     let headers = wire::chat_headers(
